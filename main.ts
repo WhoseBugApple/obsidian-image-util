@@ -1,852 +1,1241 @@
-import { link, readFile } from 'fs';
-import { App, CachedMetadata, Editor, EditorPosition, EditorSuggest, EditorSuggestContext, EditorSuggestTriggerInfo, FileManager, LinkCache, MarkdownView, MetadataCache, Modal, Notice, Platform, Plugin, PluginSettingTab, Setting, TAbstractFile, TFile, TFolder, TagCache, Vault, WorkspaceLeaf, normalizePath, parseFrontMatterEntry } from 'obsidian';
+import { ExecException, exec, spawn } from 'child_process';
+import { access } from 'fs';
+import { Notice, Plugin, TAbstractFile, TFile } from 'obsidian';
+import { DEFAULT_SETTINGS } from 'partial ts src/DEFAULT_SETTINGS';
+import { LimitedFunctionCall } from 'partial ts src/LimitedFunctionCall';
+import { MapAndEntries } from 'partial ts src/MapAndEntries';
+import { OneTaskOneTime } from 'partial ts src/OneTaskOneTime';
+import { PathViewRecord } from 'partial ts src/PathViewRecord';
+import { PluginSettings } from 'partial ts src/PluginSettings';
+import { SettingTab } from 'partial ts src/SettingTab';
+import { SharedAPIs } from './partial ts src/SharedAPIs';
 
-// References
-//   general
-//     [Obsidian Developer Documentation](https://docs.obsidian.md/Home)
-//   suggest & modal
-//     [main.ts - obsidian-redirect - jglev - Github](https://github.com/jglev/obsidian-redirect/blob/main/main.ts#L155)
-//   file
-//     [Vault](https://docs.obsidian.md/Plugins/Vault)
-//     [Vault class](https://docs.obsidian.md/Reference/TypeScript+API/Vault)
-//     edit active file
-//       replace in active markdown file in edit mode
-//         [Editor](https://docs.obsidian.md/Plugins/Editor/Editor)
-//         [Editor class](https://docs.obsidian.md/Reference/TypeScript+API/Editor)
+export default class KORCImageUtilPlugin extends Plugin {
+	settings: PluginSettings
+	apis: SharedAPIs;
+	limitedFunctionCall: LimitedFunctionCall;
+	// seriallyExecutor: SeriallyExecutor_ForPromise;
+	oneMainTaskOneTime: OneTaskOneTime;
+	oneCompressionTaskOneTime: OneTaskOneTime;
+	oneCompressionAllTaskOneTime: OneTaskOneTime;
 
-export default class RedirectorPlugin extends Plugin {
 	async onload() {
-		this.addCommand({
-			id: 'redirector-report-redirect-files',
-			name: 'Report redirect-files',
-			callback: () => {
-				this.command_reportRedirectFiles();
-			}
-		});
-		this.addCommand({
-			id: 'redirector-move-redirect-file-besides-its-target',
-			name: 'Move redirect-file besides its target',
-			callback: () => {
-				this.command_moveRedirectFilesBesidesItsTarget();
-			}
-		});
-		this.addCommand({
-			id: 'redirector-replace-links-to-redirect-file-with-links-to-its-target',
-			name: 'Replace links to redirect-file with links to its target',
-			callback: () => {
-				this.command_replaceLinksToRedirectFileWithLinksToItsTarget();
-			}
-		});
-		this.addCommand({
-			id: 'redirector-format-links',
-			name: 'Format links',
-			callback: () => {
-				this.command_formatLinks();
-			}
-		});
-		// TODO remove
-		this.addCommand({
-			id: 'redirector-test',
-			name: 'Test',
-			callback: () => {
-				this.command_test();
-			}
-		});
-	}
+		this.apis = new SharedAPIs(this.app);
 
+		await this.loadSettings_async();
+		this.addSettingTab(new SettingTab(this.app, this));
+
+		this.limitedFunctionCall = new LimitedFunctionCall(this, 50);
+		// this.seriallyExecutor = new SeriallyExecutor_ForPromise();
+		this.oneMainTaskOneTime = new OneTaskOneTime();  // main task is NOT clearly defined, feel free
+		this.oneCompressionTaskOneTime = new OneTaskOneTime();
+		this.oneCompressionAllTaskOneTime = new OneTaskOneTime();
+
+		this.apis.obsidianAPIs.getWorkspace().onLayoutReady(
+			() => {
+				this.registerEvent(this.apis.obsidianAPIs.getVault().on("create", 
+					this.createFileOrDir_callback_async.bind(this)
+				));
+			}
+		);
+
+		this.addCommand({
+			id: 'compress-all-images',
+			name: 'Compress all images',
+			callback: () => {
+				this.tryCompressAllImagesInVault_oneTaskOneTime_async(true);
+			}
+		});
+
+		this.addCommand({
+			id: 'rename-images-in-current-file',
+			name: 'Rename images in current-file',
+			callback: () => {
+				this.tryRenameImagesInCurrentFile_async(true);
+			}
+		});
+
+		this.addCommand({
+			id: 'fix-all-image-suffix-names',
+			name: 'Fix all image-suffix-names',
+			callback: () => {
+				this.tryFixAllImageSuffixName_async(true);
+			}
+		});
+
+		this.addCommand({
+			id: 'report-image-files',
+			name: 'Report images',
+			callback: () => {
+				this.command_reportImages_async();
+			}
+		});
+
+		// this.addCommand({
+		// 	id: 'test',
+		// 	name: 'test',
+		// 	callback: () => {
+		// 		this.testCommand();
+		// 	}
+		// });
+	}
+ 
 	onunload() {
-
+		
 	}
 
-	reportName: string = "redirect-files report.md";
+	// async testCommand() {
+	// 	this.tryCompressAllImagesInVault_oneTaskOneTime();
+	// }
+
+	// await me to immediately return a async-function
+	async idle_async() {}
+
+	// path of obsidian view
+	reportName: string = "korc images report.md";
 	parentOfReport_path: string = "";
 	reportPath: string = this.parentOfReport_path + this.reportName;
-	async command_reportRedirectFiles() {
+	async command_reportImages_async() {
 		// idle
-		await this.idle();
+		await this.idle_async();
 
 		// get redirect files
-		var redirectFiles: TFile[] = await this.getRedirectFiles();
-		if (redirectFiles.length == 0) {
-			new Notice('report finished, NO redirect-file is found');
+		var images: TFile[] = await this.apis.obsidianAPIs.getAllImageFiles();
+		if (images.length == 0) {
+			new Notice('report finished, NO image is found');
 			return;
 		}
 		
 		// report
-		await this.createReport(redirectFiles, this.reportPath, this.reportName, this.parentOfReport_path);
+		await this.reportImages_async(images, this.reportPath, this.reportName, this.parentOfReport_path);
 	}
 
-	async command_moveRedirectFilesBesidesItsTarget() {
-		// idle
-		await this.idle();
-
-		// get redirect files
-		var redirectFiles: TFile[] = await this.getRedirectFiles();
-		if (redirectFiles.length == 0) {
-			new Notice('move finished, NO redirect-file is found');
-			return;
-		}
-
-		// move
-		var rFilesIterator: IterableIterator<TFile> = redirectFiles.values();
-		var count = await this.recursiveMoveRedirectFiles(rFilesIterator);
-		new Notice('move finished, ' + count + ' redirect-files are moved');
-	}
-
-	async command_replaceLinksToRedirectFileWithLinksToItsTarget() {
-		// idle
-		await this.idle();
-
-		// get redirect files
-		var redirectFiles: TFile[] = await this.getRedirectFiles();
-		if (redirectFiles.length == 0) {
-			new Notice('replace finished, NO redirect-file is found');
-			return;
-		}
-
-		// replace
-		var count = await this.replaceLinksToRedirectFilesWithLinksToItsTarget(redirectFiles);
-		new Notice('replace finished, ' + count + ' files are replaced');
-	}
-
-	// TODO optimize
-	async command_formatLinks() {
-		// idle
-		await this.idle();
-
-		var filesChanged = await this.refreshAllLinks();
-		new Notice('format finished, ' + filesChanged + ' files are changed');
-		console.log(`${filesChanged} files are changed`);
-		return;
-	}
-
-	// TODO remove
-	async command_test() {
-		await this.test();
-	}
-
-	// for each redirect-file, move it if necessary
-	// return count of moved
-	async recursiveMoveRedirectFiles(rFilesIterator: IterableIterator<TFile>): Promise<number> {
-		var nextElementContainer = rFilesIterator.next();
-		if (nextElementContainer.done) return 0;
-		var rFile: TFile = nextElementContainer.value;
-		
-		// handle current
-		var isMove = await this.moveIfNecessary(rFile);
-
-		// next
-		var count = await this.recursiveMoveRedirectFiles(rFilesIterator);
-		return count + (isMove ? 1 : 0);
-	}
-
-	async moveIfNecessary(redirectFile: TFile): Promise<boolean> {
-		var rFile: TFile = redirectFile;
-
-		// get link
-		var links = this.tryGetLinks(rFile);
-		if (!links) return false;
-		if (links.length != 1) return false;
-		var link = links.at(0);
-		if (!(link?.link)) return false;
-
-		// get target
-		var targetFile = this.tryGetLinkTarget(link.link, rFile.path);
-		if (!targetFile) return false;
-		
-		// NOT move if same path
-		if (targetFile.parent?.path == rFile.parent?.path) return false;
-
-		// need to move
-		var newDir = targetFile.parent?.path;
-		if (!newDir) newDir = '';
-		var newPath = this.concatDirectoryPathAndFileName(newDir, rFile.name);
-		await this.moveOrRename_fileOrDirectory(rFile, newPath);
-
-		return true;
-	}
-
-	getRedirectFiles(): TFile[] {
-		var redirectFiles: TFile[] = app.vault.getMarkdownFiles().filter((file, idx, files) => {
-			var someTagSatisfy = this.tryGetFileMetadata(file)?.tags?.some((tag, idx, tags) => {
-				return tag.tag.toLowerCase() == "#redirect";
-			});
-			var isTagSayRedirect = someTagSatisfy;
-			if (isTagSayRedirect) {
-				return true;
-			}
-
-			var frontmatter = this.tryGetFileMetadata(file)?.frontmatter;
-			var yamlPropValue = parseFrontMatterEntry(frontmatter, 'redirect');
-			var isYamlSayDirect = yamlPropValue == true;
-			if (isYamlSayDirect) {
-				return true;
-			}
-
-			return false;
-		});
-
-		return redirectFiles;
-	}
-
-	async createReport(redirectFiles: TFile[], 
-		reportFilePath: string, reportName: string, parentOfReport_path: string) {
-		// delete report if exist
-		await this.removeReportFile(reportFilePath);
+	async reportImages_async(images: TFile[], 
+			reportFilePath: string, reportName: string, parentOfReport_path: string) {
+		// delete report-file if exist
+		await this.removeReportFile_async(reportFilePath);
 		var emptyReportText: string = '';
-		var reportText: string = await this.getReportText(redirectFiles, reportFilePath, emptyReportText);
-		await this.createReportFile(reportFilePath, reportText, emptyReportText);
+		var reportText: string = this.getReportText(images, reportFilePath, emptyReportText);
+		await this.handleReportText_async(reportFilePath, reportText, emptyReportText);
 	}
 
-	async removeReportFile(reportFilePath: string) {
-		var file = this.tryGetFile(reportFilePath);
-		if (file) await app.vault.delete(file);
+	async removeReportFile_async(reportFilePath: string) {
+		await this.apis.obsidianAPIs.deleteFileIfExist_async(reportFilePath);
 	}
 
-	async getReportText(
-		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
+	getReportText(
+			images: TFile[], reportFilePath: string, emptyReportText: string): string {
 		var reportText: string = emptyReportText;
-		reportText += await this.getLinksToRedirectFilesReportText(redirectFiles, reportFilePath, emptyReportText);
-		reportText += await this.getIncorrectRedirectFilesPathReportText(redirectFiles, reportFilePath, emptyReportText);
+		var mapAndEntries: MapAndEntries<string, TFile[]> = this.linkImageAndOwner(images);
+		reportText += this.getReportText_1Image1Owner(mapAndEntries, reportFilePath, emptyReportText);
 		return reportText;
 	}
 
-	// should NOT link to redirect files, should link to its target
-	async getLinksToRedirectFilesReportText(
-		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
-		return await this.getLinksToRedirectFilesReportText_traverseTheVault(redirectFiles, reportFilePath, emptyReportText);
-		// return await this.getLinksToRedirectFilesReportText_useHiddenAPIs(redirectFiles, reportFilePath, emptyReportText);
-	}
+	// path_of_image to owners
+	linkImageAndOwner(images: TFile[]): MapAndEntries<string, TFile[]> {
+		var apis = this.apis;
+		var opis = apis.obsidianAPIs;
 
-	async getLinksToRedirectFilesReportText_traverseTheVault(
-		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
-		// report
-		var reportText: string = emptyReportText;
-		var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
-		// check each file
-		var badFileId = 0;
-		app.vault.getMarkdownFiles().forEach((file, idx, files) => {
-			var reportForThisFile = emptyReportText;
-			// check each link
-			this.tryGetFileMetadata(file)?.links?.forEach((link, idx, links) => {
-				var targetFile = this.tryGetLinkTarget(link.link, file.path);
-				if (targetFile == null) return;
-				var targetPath = targetFile.path;
-
-				// if good link then return
-				var targetIsRedirectFile = false;
-				if (path2OneOfMap.get(targetPath)) targetIsRedirectFile = true;
-				if (!targetIsRedirectFile) return;
-
-				// need to report this link, because its target is redirect file
-				var redirectFile: TFile = targetFile;
-				var linkToRedirectFile = this.generateMarkdownLink(redirectFile, reportFilePath);
-				reportForThisFile += linkToRedirectFile + '\n\n';
-			})
-			if (reportForThisFile != emptyReportText) {
-				// if any report, add extra-info (includes link to this file)
-				var prefix = '';
-				var headingForEntry = '## ' + badFileId + '\n';
-				var headingForFile = '### bad-file\n';
-				var linkToBadFile = this.generateMarkdownLink(file, reportFilePath) + '\n\n';
-				var headingForBadLinks = '### link to redirect-files\n';
-				prefix += headingForEntry + headingForFile + linkToBadFile + headingForBadLinks;
-				reportForThisFile = prefix + reportForThisFile;
-				reportText += reportForThisFile;
-				badFileId++;
-			}
-		});
-		if (reportText != emptyReportText) {
-			// if any report, add extra-info
-			reportText = '# should NOT link to Redirect-File\n' + reportText;
-		}
-		return reportText;
-	}
-
-	// very expensive (2023.11.03)
-	// is the API async? if it is, should await
-	async getLinksToRedirectFilesReportText_useHiddenAPIs(
-		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
-		// report
-		var reportText: string = emptyReportText;
-		var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
-		// check each redirect-file
-		var badRedirectFileId = 0;
-		redirectFiles.forEach((rFile, idx, rFiles) => {
-			var reportForThisFile = emptyReportText;
-			var backFiles: Array<TFile> = this.tryGetBackFiles_useHiddenAPIs(rFile);
-			backFiles.forEach((backFile: TFile, idx: number, backFiles: any) => {
-				var badFile = backFile;
-				var linkToBadFile = this.generateMarkdownLink(badFile, reportFilePath);
-				reportForThisFile += linkToBadFile + '\n\n';
-			});
-			if (reportForThisFile != emptyReportText) {
-				// if any report, add extra-info (includes link to this file)
-				var prefix = '';
-				var headingForEntry = '## ' + badRedirectFileId + '\n';
-				var headingForRedirectFile = '### redirect-file\n';
-				var linkToRedirectFile = this.generateMarkdownLink(rFile, reportFilePath) + '\n\n';
-				var headingForBadFiles = '### bad-files\n';
-				prefix += headingForEntry + headingForRedirectFile + linkToRedirectFile + headingForBadFiles;
-				reportForThisFile = prefix + reportForThisFile;
-				reportText += reportForThisFile;
-				badRedirectFileId++;
-			}
-		});
-		if (reportText != emptyReportText) {
-			// if any report, add extra-info
-			reportText = '# should NOT link to Redirect-File\n' + reportText;
-		}
-		return reportText;
-	}
-
-	// returns a special map, 
-	// input a path of a markdown-file, output is that markdown-file is one of redirect-files, 
-	// true stands for yes, undefined or false stands for no
-	getPath2OneOfMap(redirectFiles: TFile[]) {
-		var map = new Map<string, boolean>();
-		redirectFiles.forEach(rFile => {
-			map.set(rFile.path, true);
-		});
-		return map;
-	}
-
-	// if there is only 1 link in redirect files, then, 
-	// should put redirect files besides it's target, at the same directory
-	async getIncorrectRedirectFilesPathReportText(
-		redirectFiles: TFile[], reportFilePath: string, emptyReportText: string): Promise<string> {
-		// report
-		var reportText: string = emptyReportText;
-		// report each file
-		redirectFiles.forEach((rFile, idx, rFiles) => {
-			// get link
-			var metadata = this.tryGetFileMetadata(rFile);
-			var links = metadata?.links;
-			if (!links) return;
-			if (links.length != 1) return;
-			var link = links.at(0);
-			if (!(link?.link)) return;
-
-			// get target
-			var targetFile = this.tryGetLinkTarget(link.link, rFile.path);
-			if (!targetFile) return;
-			
-			// compare directory
-			if (targetFile.parent?.path != rFile.parent?.path) {
-				// need to report
-				var mdlink = this.generateMarkdownLink(rFile, reportFilePath);
-				reportText += mdlink + '\n\n'
-			}
+		// map
+		var mapAndEntries = new MapAndEntries<string, TFile[]>();
+		images.forEach(image => mapAndEntries.entries.push(image.path));
+		mapAndEntries.entries.forEach(entry => {
+			mapAndEntries.map.set(entry, []);
 		})
-		// if there is any report, add a heading
+
+		// collect info for map
+		// check each md file
+		apis.obsidianAPIs.getMarkdownFiles().forEach((file, idx, files) => {
+			// check each link
+			opis.tryGetInternalLinksDistinctByLinkTextAndTarget(file)?.forEach((link, idx, links) => {
+				// get path of target
+				// now, mdFile -> link -> target -> target path
+				var targetFile = opis.tryGetFileByLink(link.link, file.path);
+				if (!targetFile) return;
+				var targetPath = opis.getFilePath_ObsidianView(targetFile);
+
+				// if mdFile link to those image, then ...
+				if (mapAndEntries.map.has(targetPath)) {
+					var owners = mapAndEntries.map.get(targetPath);
+					if (owners == null) throw new Error('expect owners not null');
+					owners.push(file);
+				}
+			});
+		});
+
+		return mapAndEntries;
+	}
+
+	getReportText_1Image1Owner(
+			mapAndEntries: MapAndEntries<string, TFile[]>, reportFilePath: string, emptyReportText: string): string {
+		var reportText: string = emptyReportText;
+
+		reportText += this.getReportText_imagesThat2OrMoreOwner(mapAndEntries, this.reportPath, emptyReportText);
+		reportText += this.getReportText_imagesThat0Owner(mapAndEntries, this.reportPath, emptyReportText);
+
 		if (reportText != emptyReportText) {
-			var heading = '# Redirect-Files are placed at incorrect directory\n' + 
-							'should put each besides its Target-File\n\n';
-			reportText = heading + reportText;
+			// if any report, add extra-info
+			reportText = '# 1 image need exactly 1 owner\n' + reportText;
 		}
-		// return
 		return reportText;
 	}
 
-	async createReportFile(reportFilePath: string, reportText: string, emptyReportText: string) {
+	// should NOT 2-or-more note link to 1 image
+	getReportText_imagesThat2OrMoreOwner(
+			mapAndEntries: MapAndEntries<string, TFile[]>, reportFilePath: string, emptyReportText: string): string {
+		var apis = this.apis;
+		var opis = apis.obsidianAPIs;
+
+		var reportText: string = emptyReportText;
+
+		// build up report text
+		var badImageId = 1;
+		mapAndEntries.entries.forEach(entry => {
+			var imagePath = entry;
+			var owners = mapAndEntries.map.get(entry);
+			if (owners == null) throw new Error('expect owners not null');
+			var ownerCount = owners.length;
+
+			if (ownerCount >= 2) {
+				// ill
+				reportText += `### ${badImageId}\n`;
+				var imageFile = opis.getFile(imagePath);
+				var imageMarkdownLink = opis.generateMarkdownLink(imageFile, reportFilePath);
+				reportText += `#### bad image\n${imageMarkdownLink}\n\n`;
+				reportText += `#### owners\n`;
+				owners.forEach(owner => {
+					var ownerMarkdownLink = opis.generateMarkdownLink(owner, reportFilePath);
+					reportText += `${ownerMarkdownLink}\n\n`;
+				});
+				badImageId++;
+			}
+		});
+
+		if (reportText != emptyReportText) {
+			// if any report, add extra-info
+			reportText = '## images that 2 or more owner\n' + reportText;
+		}
+		return reportText;
+	}
+
+	// should NOT no note link to 1 image
+	getReportText_imagesThat0Owner(
+			mapAndEntries: MapAndEntries<string, TFile[]>, reportFilePath: string, emptyReportText: string): string {
+		var apis = this.apis;
+		var opis = apis.obsidianAPIs;
+
+		var reportText: string = emptyReportText;
+
+		// build up report text
+		var badImageId = 1;
+		mapAndEntries.entries.forEach(entry => {
+			var imagePath = entry;
+			var owners = mapAndEntries.map.get(entry);
+			if (owners == null) throw new Error('expect owners not null');
+			var ownerCount = owners.length;
+
+			if (ownerCount == 0) {
+				// ill
+				reportText += `### ${badImageId}\n`;
+				var imageFile = opis.getFile(imagePath);
+				var imageMarkdownLink = opis.generateMarkdownLink(imageFile, reportFilePath);
+				reportText += `#### bad image\n${imageMarkdownLink}\n\n`;
+				badImageId++;
+			}
+		});
+
+		if (reportText != emptyReportText) {
+			// if any report, add extra-info
+			reportText = '## images that 0 owner\n' + reportText;
+		}
+		return reportText;
+	}
+
+	async handleReportText_async(reportFilePath: string, reportText: string, emptyReportText: string) {
 		if (reportText == emptyReportText) {
 			new Notice("report finished, nothing to report");
 			return;
 		}
-		var reportFile = await app.vault.create(reportFilePath, reportText);
-		await this.openFile(reportFile);
+		var reportFile = await this.apis.obsidianAPIs.createFile_async(reportFilePath, reportText);
+		await this.apis.obsidianAPIs.openFile_async(reportFile);
 		new Notice("report finished, see report-file");
 	}
 
-	// don't forget suffix .md
-	tryGetFile(path: string): TFile | null {
-		var file: TFile | null = null;
-		var fileOrFolder = app.vault.getAbstractFileByPath(path);
-		if (!fileOrFolder) return null;
-		if (fileOrFolder instanceof TFile) {
-			file = fileOrFolder;
-		}
-		return file;
-	}
-
-	tryGetDirectory(path: string): TFolder | null {
-		var folder: TFolder | null = null;
-		var fileOrFolder = app.vault.getAbstractFileByPath(path);
-		if (!fileOrFolder) return null;
-		if (fileOrFolder instanceof TFolder) {
-			folder = fileOrFolder;
-		}
-		return folder;
-	}
-
-	tryGetLinks(file: TFile): LinkCache[] | null {
-		var metadata = this.tryGetFileMetadata(file);
-		if (!metadata) return null;
-		var links = metadata.links;
-		if (!links || links.length == 0) return null;
-		return links;
-	}
-
-	tryGetFileMetadata(file: TFile): CachedMetadata | null {
-		return app.metadataCache.getFileCache(file);
-	}
-
-	// the files that link to current file
-	// [How to get backlinks for a file?](https://forum.obsidian.md/t/how-to-get-backlinks-for-a-file/45314/1)
-	// very expensive (2023.11.03)
-	// is the API async? if it is, should await
-	tryGetBackFiles_useHiddenAPIs(file: TFile): Array<TFile> {
-		var backFiles: Array<TFile> = [];
-		var metadataCache: any = app.metadataCache;
-		var backlinksContainer = metadataCache.getBacklinksForFile(file);
-		backlinksContainer = backlinksContainer.data;
-		Object.keys(backlinksContainer).forEach((filePath) => {
-			var backFile = this.tryGetFile(filePath);
-			if (!backFile) return;
-			backFiles.push(backFile);
-		})
-		return backFiles;
-	}
-
-	// the links towards current file
-	// [How to get backlinks for a file?](https://forum.obsidian.md/t/how-to-get-backlinks-for-a-file/45314/1)
-	// very expensive (2023.11.03)
-	// is the API async? if it is, should await
-	tryGetBacklinks_useHiddenAPIs(file: TFile): Array<LinkCache> {
-		var backlinks: Array<LinkCache> = [];
-		var metadataCache: any = app.metadataCache;
-		var backlinksContainer = metadataCache.getBacklinksForFile(file);
-		backlinksContainer = backlinksContainer.data;
-		Object.keys(backlinksContainer).forEach((filePath) => {
-			var backlinks0: Array<LinkCache> = backlinksContainer[filePath];
-			backlinks0.forEach((backlink) => {
-				backlinks.push(backlink);
-			})
-		})
-		return backlinks;
-	}
-
-	// at current file, try to get the target of link
-	tryGetLinkTarget(link: string, pathOfCurrentFile: string): TFile | null {
-		return app.metadataCache.getFirstLinkpathDest(link, pathOfCurrentFile);
-	}
-
-	// at current file, generate the markdown link of target file
-	generateMarkdownLink(targetFile: TFile, pathOfCurrentFile: string): string {
-		return app.fileManager.generateMarkdownLink(targetFile, pathOfCurrentFile);
-	}
-
-	// [Move file to other locations dynamically using callbacks](https://forum.obsidian.md/t/move-file-to-other-locations-dynamically-using-callbacks/64334)
-	// change the path
-	async moveOrRename_fileOrDirectory(fileOrDirectory: TAbstractFile, newPath: string) {
-		await app.fileManager.renameFile(fileOrDirectory, newPath);
-	}
-
-	// [Workspace](https://docs.obsidian.md/Plugins/User+interface/Workspace)
-	// [Workspace class](https://docs.obsidian.md/Reference/TypeScript+API/Workspace)
-	// [Workspace.getLeaf() method](https://docs.obsidian.md/Reference/TypeScript+API/workspace/getLeaf_1)
-	// split display all the childs
-	// tabs display one of childs, at any moment
-	async openFile(
-		file: TFile
-	) {
-		let leaf: WorkspaceLeaf;
-
-		// open file in new tab
-		leaf = app.workspace.getLeaf('tab');
-		await leaf.openFile(file);
-	
-		// focus
-		app.workspace.setActiveLeaf(leaf, { focus: true });
-	
-		// source view
-		const leafViewState = leaf.getViewState();
-		await leaf.setViewState({
-			...leafViewState,
-			// eslint-disable-next-line @typescript-eslint/no-unsafe-assignment
-			state: {
-				...leafViewState.state,
-				mode: 'source',
-			},
-		});
-	}
-
-	concatDirectoryPathAndFileName(dirPath: string, fileName: string): string {
-		var concated: string = '';
-		// get path separator & normalize path
-		var sep = this.getPathSeparator();
-		var dirPathAsPrefix = normalizePath(dirPath);
-		// is root dir?
-		var rootDir = false;
-		if (dirPathAsPrefix == '' || dirPathAsPrefix == sep) {
-			rootDir = true;
-		}
-		// prepare prefix, the dir path
-		if (rootDir) {
-			dirPathAsPrefix = '';
-		} else {
-			if (!dirPathAsPrefix.endsWith(sep)) {
-				dirPathAsPrefix += sep;
-			}
-		}
-		// concat & normalize
-		concated = normalizePath(dirPathAsPrefix + fileName);
-		// return
-		return concated;
-	}
-
-	sep: string = '';
-
-	getPathSeparator() {
-		if (this.sep == '') {
-			this.sep = normalizePath('/');
-			// if normalizePath() do NOT tell me the separator
-			if (this.sep == '') this.sep = '/';
-			// check it before return
-			if (!['/', '\\'].includes(this.sep)) {
-				throw new Error('the accquired path-separator is strange, it\'s ' + this.sep + ' , so stop the execution');
-			}
-		}
-		return this.sep;
-	}
-
-	// cached
-	// sep str to lines
-	strToLinesMap_cache: Map<string, string[]> = new Map();
-	cachedStrToLines(str: string, removeSeparatorFromLines: boolean = true, separators : string[]= ['\r\n', '\n']) {
-		// return from cache if exist
-		var cachedOrNull = this.strToLinesMap_cache.get(str);
-		if (cachedOrNull) return cachedOrNull;
-
-		// do compute
-		return this.strToLines(str, removeSeparatorFromLines, separators);
-	}
-
-	// remove from the cache
-	removeCacheFromCachedStrToLines(str: string) {
-		this.strToLinesMap_cache.delete(str);
-	}
-
-	// sep str to lines
-	strToLines(str: string, removeSeparatorFromLines: boolean = true, separators : string[]= ['\r\n', '\n']): string[] {
-		// sort sep from long to short
-		separators.sort((sep1, sep2) => {
-			return sep1.length - sep2.length;
-		});
-		return this.strToLinesBody(str, 0, separators, removeSeparatorFromLines);
-	}
-
-	// sep str-from-a-index to lines
-	private strToLinesBody(str: string, strStartIdx: number, separators : string[], removeSeparator: boolean, lines: string[] = []): string[] {
-		// try to find next sep in each substr
-		var isFoundSep = false;
-		var prefix = '';  // includes sep or NOT, depends
-		var theFoundSep = '';
-		var suffixStartIdx = -1;  // NOT includes sep
-		for(var i=strStartIdx; i<str.length; i++) {
-			// each substr, is the str starts from i
-			// is there a sep?
-			for(var j=0; j<separators.length; j++) {
-				// each sep
-				var sep = separators[j];
-				if (str.startsWith(sep, i)) {
-					var sepStartIdx = i;
-					var sepEndIdxExclusive = sepStartIdx + sep.length;
-					isFoundSep = true;
-					if (removeSeparator)
-						prefix = str.substring(strStartIdx, sepStartIdx);
-					else
-						prefix = str.substring(strStartIdx, sepEndIdxExclusive);
-					theFoundSep = sep;
-					suffixStartIdx = sepEndIdxExclusive;
-					break;
-				}
-			}
-			if (isFoundSep) break;
-		}
-
-		// if NOT found next sep then
-		if (!isFoundSep) {
-			lines.push(str.substring(strStartIdx));
-			return lines;
-		}
-		
-		// found the sep
-		lines.push(prefix);
-		return this.strToLinesBody(str, suffixStartIdx, separators, removeSeparator, lines);
-	}
-
-	standardSeparator: string = '\n';
-	linesToStr(strArr: string[]): string {
-		var combined = '';
-		strArr.forEach((str, idx) => {
-			if (idx == 0)
-				combined += str;
-			else
-				combined += this.standardSeparator + str;
-		})
-		return combined;
-	}
-
-	sortLinksFromTailToHead(pairs: MisleadingLinkAndRealTarget[]): MisleadingLinkAndRealTarget[] {
-		var sorted = pairs.sort((a, b) => {
-			var apos = a.misleadingLink.position;
-			var bpos = b.misleadingLink.position;
-			if (apos.end <= bpos.start) {
-				return -1;
-			} else if (bpos.end <= apos.start) {
-				return 1;
-			} else {
-				this.reportError('fail to sort links');
-				return 0;
-			}
-		})
-		return sorted;
-	}
-
-	// return how many links is changed
-	async replaceLinksInFile(pairs: MisleadingLinkAndRealTarget[], file: TFile, log: boolean = true): Promise<number> {
-		var linksChanged = 0;
-		var oldLinks: string[] = [];
-		var newLinks: string[] = [];
-
-		pairs = this.sortLinksFromTailToHead(pairs);
-
-		await this.updateFile(file, (content) => {
-			var newContent = content;
-			var lines = this.strToLines(newContent);
-			pairs.forEach((pair) => {
-				var link = pair.misleadingLink;
-				var newTarget = pair.realTarget;
-
-				// link info
-				var linkStart = link.position.start;
-				var linkEnd = link.position.end;
-				var linkContent = link.original;
-				var newLink = pair.getRealMarkdownLink();
-				if (newLink == linkContent) return;
-
-				// try found link in lines
-				var tryFoundLine = lines[linkStart.line];
-				var tryFound = tryFoundLine.substring(linkStart.col, linkEnd.col);
-				if (tryFound != linkContent) {
-					console.log(link);
-					this.reportError('can NOT locate link in file, \n' + 
-						`file ${file.name}\n` + 
-						`filepath ${file.path}\n` + 
-						`expect ${linkContent}\n` + 
-						`found ${tryFound}`, 
-						false);
+	async tryFixAllImageSuffixName_async(isMainTask: boolean = true) {
+		try {
+			if (isMainTask) {
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
+					this.apis.reportLog('already exist a running main task', false, true, true);
 					return;
 				}
-	
-				// has found link in content
-				var foundLine = tryFoundLine;
-				var found = tryFound;
-				var prefix = foundLine.substring(0, linkStart.col);
-				var suffix = foundLine.substring(linkEnd.col);
-				
-				// get new line
-				var newLine = prefix + newLink + suffix;
+				this.oneMainTaskOneTime.knowATaskIsRunning();
+			}
 
-				// replace in lines
-				lines[linkStart.line] = newLine;
-
-				// others
-				linksChanged++;
-				oldLinks.push(linkContent);
-				newLinks.push(newLink);
-			});
-
-			newContent = this.linesToStr(lines);
-			return newContent;
-		});
-
-		// log
-		if (log) {
-			if (linksChanged > 0) {
-				console.log('\n+++++ File Changed Log Start ++++++++++++++++')
-				console.log(
-					'\n' + 
-					`filename: ${file.name}\n` + 
-					`filepath: ${file.path}\n` + 
-					`countLinksChanged = ${linksChanged}`);
-				var detailedLinksChangeLog = '';
-				for(var i=0; i<linksChanged; i++) {
-					detailedLinksChangeLog += `\n- oldLink: ${oldLinks[i]}`;
-					detailedLinksChangeLog += `\n  - newLink: ${newLinks[i]}`;
+			const images = this.apis.obsidianAPIs.getAllImageFiles();
+			var countModified = 0;
+			for(var i=0; i<images.length; ++i) {
+				var image = images[i];
+				try {
+					var isModified = await this.tryFixAImageSuffixName_async(image);
+					if (isModified) countModified++;
+				} catch(e) {
+					this.apis.reportLog(`can NOT fix ${image.name} at ${image.path}`, false, false, true);
 				}
-				console.log(detailedLinksChangeLog);
-				console.log('\n------------- File Changed Log End -----')
+			}
+			this.apis.reportLog(`Fix Finished, \n${countModified} image-suffix-names are fixed`, false, true, true);
+		} catch(error) {
+			this.apis.reportLog('Fix Interrupted', false, true, true);
+			console.log(error);
+		} finally {
+			if (isMainTask)
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
+					this.oneMainTaskOneTime.knowThatTaskEnd();
+		}
+	}
+
+	// return is suffix changed
+	tryFixAImageSuffixName_async(image: TFile): Promise<boolean> {
+		return new Promise<boolean>(
+			(resolve, reject) => {
+				if (this.isImageReadonly(image)) {
+					resolve(false);
+					return;
+				}
+
+				var apis = this.apis;
+				var opis = apis.obsidianAPIs;
+
+				opis.readFileBinary_async(image).then(
+					data => {
+						var bytes = data;
+						var bytesArr = [bytes];
+						var blob = new Blob(bytesArr, {
+							"type": "image"
+						});
+						var fileReader = new FileReader();
+						fileReader.onloadend = e => {
+							try {
+								var data = e.target?.result;
+								if (!data || !(data instanceof ArrayBuffer)) throw new Error('can NOT read image as ArrayBuffer');
+								var arr = (new Uint8Array(data)).subarray(0, 4);
+								var header = "";
+								for(var i = 0; i < arr.length; i++) {
+									header += arr[i].toString(16).toUpperCase();
+								}
+								// Check the file signature against known types
+								if (header.startsWith('FFD8')) {
+									// jpeg
+									// new Notice(`${image.name} is jpeg`);
+									var jpegSuffix = '.jpeg';
+									var curSuffix = opis.getFileDotStartSuffixName_ObsidianView(image);
+									if (curSuffix != jpegSuffix) {
+										this.apis.obsidianAPIs.renameFileSuffixName_async(image, jpegSuffix).then(
+											() => {
+												console.log(`rename ${image.name} at ${image.path} suffix from ${curSuffix} to ${jpegSuffix}`);
+												resolve(true);
+											});
+										return;
+									} else {
+										resolve(false);
+										return;
+									}
+								} else if (header.startsWith('8950')) {
+									// png
+									// new Notice(`${image.name} is png`);
+									var pngSuffix = '.png';
+									var curSuffix = opis.getFileDotStartSuffixName_ObsidianView(image);
+									if (curSuffix != pngSuffix) {
+										this.apis.obsidianAPIs.renameFileSuffixName_async(image, pngSuffix).then(
+											() => {
+												console.log(`rename ${image.name} at ${image.path} suffix from ${curSuffix} to ${pngSuffix}`);
+												resolve(true);
+											});
+										return;
+									} else {
+										resolve(false);
+										return;
+									}
+								} else {
+									throw new Error(`unsupported image type, header is ${header}`);
+								}
+							} catch(e) {
+								reject(e);
+							}
+						};
+						fileReader.readAsArrayBuffer(blob);
+					}
+				)
+			}
+		)
+	}
+
+	async tryRenameImagesInCurrentFile_async(isMainTask: boolean = true) {
+		try {
+			if (isMainTask) {
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
+					this.apis.reportLog('already exist a running main task', false, true, true);
+					return;
+				}
+				this.oneMainTaskOneTime.knowATaskIsRunning();
+			}
+
+			var apis = this.apis;
+			var opis = apis.obsidianAPIs;
+
+			var mdview = opis.getActiveMarkdownView();
+			var file = mdview.file;
+			var linksDistinct = opis.tryGetInternalLinksDistinctByLinkTextAndTarget(file);
+			if (linksDistinct) {
+				var images: TFile[] = [];
+				linksDistinct.forEach(
+					link => {
+						var target = opis.tryGetLinkTarget(link.link, file.path);
+						if (!target) return;
+						if (!opis.isImage(target)) return;
+						images.push(target);
+					}
+				);
+				for(var i=0; i<images.length; i++) {
+					var image = images[i];
+					try {
+						await this.retryable_renameImage_aysnc(image, image.extension, file);
+					} catch(e) {
+						this.apis.reportLog(`failed to rename "${image.name}" at "${image.path}" because: \n${e}`, false, true, true);
+					}
+				}
+			}
+			this.apis.reportLog('Rename Finished', false, true, true);
+		} catch(error) {
+			this.apis.reportLog('Rename Interrupted', false, true, true);
+			console.log(error);
+		} finally {
+			if (isMainTask)
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
+					this.oneMainTaskOneTime.knowThatTaskEnd();
+		}
+	}
+
+	// if already task, abort
+	// if no task, immediately start a new task, async completed
+	async tryCompressAllImagesInVault_oneTaskOneTime_async(isMainTask: boolean = true) {
+		try {
+			if (isMainTask) {
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
+					this.apis.reportLog('already exist a running main task', false, true, true);
+					return;
+				}
+				this.oneMainTaskOneTime.knowATaskIsRunning();
+			}
+
+			if (this.oneCompressionAllTaskOneTime.alreadyHasOneRunningTask()) {
+				this.apis.reportLog('already exist a running compression task', false, true, true);
+				return;
+			}
+			this.oneCompressionAllTaskOneTime.knowATaskIsRunning();
+
+			const images = this.apis.obsidianAPIs.getAllImageFiles();
+			for(var i=0; i<images.length; ++i) {
+				var image = images[i];
+				await this.tryCompress_oneTaskOneTime_async(image, false, false).catch(
+					e => {
+						console.log(e);
+						this.apis.reportLog(`can NOT compress ${image.name} at ${image.path}`, false, false, true);
+					}
+				);
+			}
+			this.apis.reportLog('Compression Finished', false, true, true);
+		} catch(error) {
+			this.apis.reportLog('Compression Interrupted', false, true, true);
+			console.log(error);
+		} finally {
+			if (this.oneCompressionAllTaskOneTime.alreadyHasOneRunningTask())
+				this.oneCompressionAllTaskOneTime.knowThatTaskEnd();
+			if (isMainTask)
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
+					this.oneMainTaskOneTime.knowThatTaskEnd();
+		}
+	}
+
+	async createFileOrDir_callback_async(fileOrDir: TAbstractFile) {
+		if (fileOrDir instanceof TFile) {
+			await this.createFile_callback_async(fileOrDir);
+		}
+	}
+
+	async createFile_callback_async(file: TFile) {
+		if (this.apis.obsidianAPIs.isImage(file)) {
+			var imageFile: TFile = file;
+			await this.createImageFile_callback_async(imageFile);
+		}
+	}
+
+	async createImageFile_callback_async(imageFile: TFile) {
+		if(this.oneCompressionTaskOneTime.alreadyHasOneRunningTask()) {
+			await this.createImageWhenCompressionTaskRunning_callback_async(imageFile);
+		} else {
+			await this.createImageWhenNOCompressionTask_callback_async(imageFile);
+		}
+	}
+
+	async createImageWhenCompressionTaskRunning_callback_async(imageFile: TFile) {
+		return;
+	}
+
+	async createImageWhenNOCompressionTask_callback_async(imageFile: TFile): Promise<void> {
+		if (!this.settings.compressAndRenameImageWhenPaste) return;
+		await this.tryCompress_oneTaskOneTime_async(imageFile, true, true);
+	}
+
+	// if already task, abort
+	// if reach recursion limit, abort
+	// if no task, immediately start a new task, async completed
+	async tryCompress_oneTaskOneTime_async(imageFile: TFile, tryRename: boolean = true, isMainTask: boolean = true) {
+		var outFilePaths: PathViewRecord[] = [];
+		try {
+			if (isMainTask) {
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
+					this.apis.reportLog('already exist a running main task', false, true, true);
+					return;
+				}
+				this.oneMainTaskOneTime.knowATaskIsRunning();
+			}
+
+			if (this.oneCompressionTaskOneTime.alreadyHasOneRunningTask()) {
+				this.apis.reportLog('already exist a running compression task', true, false, true);
+				return;
+			}
+			this.oneCompressionTaskOneTime.knowATaskIsRunning();
+
+			this.limitedFunctionCall.ensureNoEndlessRecursion();
+
+			if (this.isImageReadonly(imageFile)) return;
+
+			var outFilePath;
+
+			// canvas jpeg
+			if (!this.settings.pngOnly) {
+				await (this.tryCompressImageWithCanvas_async(imageFile, '.jpeg', 0.8).catch(
+					reason => {
+						this.apis.reportLog(`failed to compress using canvas because:`, false, false, true);
+						console.log(reason);
+					}
+				));
+				outFilePath = new PathViewRecord(
+					this.getCanvasOutFilePath_ObsidianView(imageFile, '.jpeg'), 
+					this.apis
+				);
+				if (await this.apis.exist_async(outFilePath.path_OSView)) {
+					outFilePaths.push(outFilePath);
+				}
+			}
+
+			// canvas png
+			var isCanvasPngAvailable = false;
+			var canvasPngOutFilePath: PathViewRecord | null = null;
+			await (this.tryCompressImageWithCanvas_async(imageFile, '.png').catch(
+				reason => {
+					this.apis.reportLog(`failed to compress using canvas because:`, false, false, true);
+					console.log(reason);
+				}
+			));
+			outFilePath = new PathViewRecord(
+				this.getCanvasOutFilePath_ObsidianView(imageFile, '.png'), 
+				this.apis
+			);
+			if (await this.apis.exist_async(outFilePath.path_OSView)) {
+				isCanvasPngAvailable = true;
+				canvasPngOutFilePath = outFilePath;
+				outFilePaths.push(outFilePath);
+			}
+
+			// ffmpeg png
+			await (this.tryCompressImageWithFFMpeg_async(imageFile, '.png').catch(
+				reason => {
+					this.apis.reportLog(`failed to compress using ffmpeg because:`, false, false, true);
+					console.log(reason);
+				}
+			));
+			outFilePath = new PathViewRecord(
+				this.getFFMpegOutFilePath_ObsidianView(imageFile, '.png'), 
+				this.apis
+			);
+			if (await this.apis.exist_async(outFilePath.path_OSView)) {
+				outFilePaths.push(outFilePath);
+			}
+
+			// ffmpeg jpeg
+			if (!this.settings.pngOnly) {
+				await (this.tryCompressImageWithFFMpeg_async(imageFile, '.jpeg').catch(
+					reason => {
+						this.apis.reportLog(`failed to compress using ffmpeg because:`, false, false, true);
+						console.log(reason);
+					}
+				));
+				outFilePath = new PathViewRecord(
+					this.getFFMpegOutFilePath_ObsidianView(imageFile, '.jpeg'), 
+					this.apis
+				);
+				if (await this.apis.exist_async(outFilePath.path_OSView)) {
+					outFilePaths.push(outFilePath);
+				}
+			}
+
+			// pngquant origin png true
+			var isPngquantOriginTrueAvailable = false;
+			await (this.tryCompressImageWithPNGQuant_async(imageFile, true).catch(
+				reason => {
+					this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
+					console.log(reason);
+				}
+			));
+			outFilePath = new PathViewRecord(
+				this.getPNGQuantOutFilePath_ObsidianView(imageFile, true), 
+				this.apis
+			);
+			if (await this.apis.exist_async(outFilePath.path_OSView)) {
+				isPngquantOriginTrueAvailable = true;
+				outFilePaths.push(outFilePath);
+			}
+
+			// pngquant origin png false
+			var isPngquantOriginFalseAvailable = false;
+			await (this.tryCompressImageWithPNGQuant_async(imageFile, false).catch(
+				reason => {
+					this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
+					console.log(reason);
+				}
+			));
+			outFilePath = new PathViewRecord(
+				this.getPNGQuantOutFilePath_ObsidianView(imageFile, false), 
+				this.apis
+			);
+			if (await this.apis.exist_async(outFilePath.path_OSView)) {
+				isPngquantOriginFalseAvailable = true;
+				outFilePaths.push(outFilePath);
+			}
+
+			if (!isPngquantOriginTrueAvailable && !isPngquantOriginFalseAvailable && isCanvasPngAvailable && canvasPngOutFilePath) {
+				var canvasPngOut: TFile = (await this.apis.obsidianAPIs.waitUntilTFilesReady_async(
+					[canvasPngOutFilePath.path_ObsidianView], 
+					3000
+				))[0]
+
+				// pngquant origin png true
+				await (this.tryCompressImageWithPNGQuant_async(canvasPngOut, true).catch(
+					reason => {
+						this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
+						console.log(reason);
+					}
+				));
+				outFilePath = new PathViewRecord(
+					this.getPNGQuantOutFilePath_ObsidianView(canvasPngOut, true), 
+					this.apis
+				);
+				if (await this.apis.exist_async(outFilePath.path_OSView)) {
+					outFilePaths.push(outFilePath);
+				}
+
+				// pngquant origin png false
+				await (this.tryCompressImageWithPNGQuant_async(canvasPngOut, false).catch(
+					reason => {
+						this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
+						console.log(reason);
+					}
+				));
+				outFilePath = new PathViewRecord(
+					this.getPNGQuantOutFilePath_ObsidianView(canvasPngOut, false), 
+					this.apis
+				);
+				if (await this.apis.exist_async(outFilePath.path_OSView)) {
+					outFilePaths.push(outFilePath);
+				}
+			}
+
+			var bestOutFilePath = await this.selectBestImage_async(outFilePaths);
+
+			await this.logFiles_compressionLog_async(imageFile, outFilePaths, bestOutFilePath);
+
+			var isReplaced = await this.replaceInputFile_ifOutFileIsBetter_async(imageFile, bestOutFilePath.path_OSView);
+			await this.cleanOutFiles_async(outFilePaths);
+
+			// rename related
+			if (tryRename) {
+				var newSuffixName: string = '';
+				if (isReplaced) {
+					var bestOutFileSuffixName = this.apis.getSuffixName_OSView(bestOutFilePath.path_OSView);
+					newSuffixName = bestOutFileSuffixName;
+				} else {
+					newSuffixName = this.apis.obsidianAPIs.getFileSuffixName_ObsidianView(imageFile);
+				}
+				// try to rename
+				// detached, no await
+				// this.retryable_renameImage_aysnc(imageFile, newSuffixName).catch(e => {
+				// 	this.apis.reportLog(e.toString(), false, true, true);
+				// });
+				try {
+					await this.retryable_renameImage_aysnc(imageFile, newSuffixName);
+					this.apis.reportLog(
+						`success to rename`, 
+						false, true, false
+					);
+				} catch(e) {
+					this.apis.reportLog(e.toString(), false, true, true);
+				}
+			}
+		} catch(error) {
+			await this.cleanOutFiles_async(outFilePaths);
+			this.apis.reportLog('Compression Interrupted', false, true, true);
+			console.log(error);
+		} finally {
+			if (this.oneCompressionTaskOneTime.alreadyHasOneRunningTask())
+				this.oneCompressionTaskOneTime.knowThatTaskEnd();
+			if (isMainTask)
+				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
+					this.oneMainTaskOneTime.knowThatTaskEnd();
+		}
+	}
+
+	// masterFile is the file who own and could link to the image
+	// if NOT renamed throw error
+	// do NOT start to rename immediately, before start, it wait for a interval
+	async retryable_renameImage_aysnc(
+				imageFile: TFile, 
+				suffixName: string, 
+				masterFile: TFile | null = null, 
+				retry_interval_ms: number = 300, 
+				maxRetryTimes: number = 10){
+		if (this.isImageReadonly(imageFile)) return;
+		
+		var life = maxRetryTimes;
+		var lastError;
+		while (true) {
+			if (life <= 0) {
+				this.apis.reportLog(`failed to rename because: reach retry limit, \nlastError is: \n${lastError}`, 
+					true, false, false);
+				throw new Error('report error');
+			}
+			life--;
+			// wait a time
+			await this.apis.successAfterMs_async(retry_interval_ms);
+			// retry once
+			try {
+				await this.renameImage_async(imageFile, suffixName, masterFile);
+				return;
+			} catch(e){
+				lastError = e;
+			}
+		}
+	}
+
+	// masterFile is the file who own and could link to the image
+	// if NOT renamed throw error
+	async renameImage_async(imageFile: TFile, suffixName: string, masterFile: TFile | null = null) {
+		if (this.isImageReadonly(imageFile)) throw new Error('try to rename readonly image');
+
+		if (suffixName.length != 0 && !suffixName.startsWith('.')) suffixName = '.' + suffixName;
+
+		var apis = this.apis;
+		var opis = apis.obsidianAPIs;
+
+		if (!masterFile) {
+			// find master file
+			{
+				// is current editing file the master file?
+				var mdview = opis.getActiveMarkdownView();
+				var editingFile = mdview.file;
+				var currentFileIsMasterFile = false;
+				{
+					// check link cache of current editing file
+					{
+						var linksOrNull = opis.tryGetInternalLinks(editingFile);
+						if (linksOrNull) {
+							var links = linksOrNull;
+							// is current editing file contain link to image
+							var anyLinkToImage = links.some(
+								link => {
+									var linkTargetOrNull = opis.tryGetLinkTarget(link.link, editingFile.path);
+									if (!linkTargetOrNull) return false;
+									var linkTarget = linkTargetOrNull;
+									return linkTarget.path == imageFile.path;
+								}
+							);
+							if (anyLinkToImage) currentFileIsMasterFile = true;
+						}
+					}
+				}
+
+				if (currentFileIsMasterFile) masterFile = editingFile;
+
+				if (!masterFile) {
+					apis.reportLog("failed to rename image because: \ncan NOT determine the image name because: \ndo NOT know the file, who own the image", 
+						true, false, false);
+					throw new Error('report error');
+				}
 			}
 		}
 
-		return linksChanged;
-	}
+		var dirPath = opis.getFileDirectory_ObsidianView(imageFile);
 
-	tryGetRedirectFileTarget(redirectFile: TFile): TFile | null {
-		var metadata = this.tryGetFileMetadata(redirectFile);
-		if (!metadata) return null;
-
-		var links = metadata.links;
-		if (!links || links.length == 0) return null;
-
-		var link: LinkCache = links[0];
-		var linkStr = link.link;
-
-		var linkTarget = this.tryGetLinkTarget(linkStr, redirectFile.path);
-		if (!linkTarget) return null;
-
-		return linkTarget;
-	}
-
-	async replaceLinksToRedirectFilesWithLinksToItsTarget(redirectFiles: TFile[]): Promise<number> {
-			var path2OneOfMap = this.getPath2OneOfMap(redirectFiles);
-			// check each file
-			var mdfiles = app.vault.getMarkdownFiles();
-			var mdfilesIterator = mdfiles.values();
-			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
-				mdfilesIterator, 
-				path2OneOfMap);
-	}
-
-	// return count of modified file
-	async replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
-							mdfilesIterator: IterableIterator<TFile>, 
-							path2OneOfMap: Map<string, boolean>): Promise<number> {
-		var nextElementContainer = mdfilesIterator.next();
-		if (nextElementContainer.done) return 0;
-		var file: TFile = nextElementContainer.value;
-
-		// find badlinks in links
-		var pairs: MisleadingLinkAndRealTarget[] = [];
-		this.tryGetFileMetadata(file)?.links?.forEach((link, idx, links) => {
-			var targetFile = this.tryGetLinkTarget(link.link, file.path);
-			if (!targetFile) return;
-			var targetPath = targetFile.path;
-
-			// if good link then return
-			var targetIsRedirectFile = false;
-			if (path2OneOfMap.get(targetPath)) targetIsRedirectFile = true;
-			if (!targetIsRedirectFile) return;
-
-			// need to fix this link
-			var redirectFile: TFile = targetFile;
-			var realTarget = this.tryGetRedirectFileTarget(redirectFile);
-			if (!realTarget) return;
-
-			// output found bad links
-			var pair = new MisleadingLinkAndRealTarget(file, link, realTarget, this);
-			pairs.push(pair);
-		})
-
-		// replace if any bad
-		if (pairs.length != 0) {
-			// replace
-			var linksChanged = await this.replaceLinksInFile(pairs, file);
-			var filesChanged = linksChanged >= 1 ? 1 : 0;
-			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
-				mdfilesIterator, 
-				path2OneOfMap
-			) + filesChanged;
-		} else {
-			return await this.replaceLinksToRedirectFilesWithLinksToItsTarget_recurse(
-				mdfilesIterator, 
-				path2OneOfMap
+		var date = new Date();
+		var newName = 
+			opis.getFilePrefixName_ObsidianView(masterFile) + 
+			' - ' + 
+			`${date.getFullYear()}-${date.getMonth()+1}-${date.getDate()}T${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}-${date.getMilliseconds()}` + 
+			suffixName;
+		
+		var newPath = 
+			opis.concatDirectoryPathAndFileName_ObsidianView(
+				dirPath, newName
 			);
+		
+		// since in previous codes, know that the master file's link cache contain the link to image, 
+		//   so rename can auto-update the link to image in master file
+		await opis.move_fileOrDirectory_async(imageFile, newPath);
+	}
+
+	// https://pngquant.org/
+	// https://manpages.debian.org/testing/pngquant/pngquant.1.en.html
+	// dithering: use more color in pattle, so that have a smoother nicer gradient-color
+	async tryCompressImageWithPNGQuant_async(file: TFile, enableDithering: boolean = true): Promise<void> {
+		var apis = this.apis;
+
+		var outFilePath_ObsidianView = this.getPNGQuantOutFilePath_ObsidianView(file, enableDithering);
+		await apis.obsidianAPIs.deleteFileIfExist_async(outFilePath_ObsidianView);
+		var inFilePath_OSView = apis.obsidianAPIs.getFilePath_OSView(file);
+		var outFilePath_OSView = apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
+
+		await this.tryExecPNGQuant_async(inFilePath_OSView, outFilePath_OSView, enableDithering);
+	}
+
+	getPNGQuantOutFilePath_ObsidianView(inFile: TFile, enableDithering: boolean): string {
+		var apis = this.apis;
+
+		var pngQuantNamePart = '-pngquant';
+		var ditheringInfoNamePart = enableDithering ? '-dithering' : '-nodithering';
+		var outFileExtention = '.png';
+		var outFilePath_ObsidianView = 
+			apis.obsidianAPIs.concatDirectoryPathAndFileName_ObsidianView(
+				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
+				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + pngQuantNamePart + ditheringInfoNamePart + outFileExtention
+			);
+		return outFilePath_ObsidianView;
+	}
+
+	getPNGQuantOutFilePath_OSView(outFilePath_ObsidianView: string): string {
+		return this.apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
+	}
+
+	private tryExecPNGQuant_async(inFilePath_OSView: string, outFilePath_OSView: string, enableDithering: boolean): Promise<void> {
+		return new Promise<void>(
+			(resolve, reject) => {
+				try{
+					var apis = this.apis;
+		
+					var command = `pngquant.exe --skip-if-larger ${enableDithering ? '' : '--ordered'} --speed=1 --quality=45-85 "--output=${outFilePath_OSView}" "${inFilePath_OSView}"`;
+					exec(command, (error: ExecException, stdout: string, stderr: string) => {
+						try {
+							if (error) {
+								apis.reportLog('pngquant error', false, false, true);
+								reject(error);
+								return;
+							}
+			
+							access(outFilePath_OSView, (err) => {
+								try {
+									if (err) {
+										apis.reportLog('expect pngquant output a file, but NOT', false, false, true);
+										reject(err);
+										return;
+									}
+				
+									resolve();
+								} catch(error) {
+									reject(error);
+								}
+							});
+						} catch(error) {
+							reject(error);
+						}
+					});
+				} catch (error) {
+					reject(error);
+				}
+			}
+		);
+	}
+
+	async tryCompressImageWithFFMpeg_async(file: TFile, format: '.png' | '.jpeg'): Promise<void> {
+		var apis = this.apis;
+
+		var outFilePath_ObsidianView = this.getFFMpegOutFilePath_ObsidianView(file, format);
+		await apis.obsidianAPIs.deleteFileIfExist_async(outFilePath_ObsidianView);
+		var inFilePath_OSView = apis.obsidianAPIs.getFilePath_OSView(file);
+		var outFilePath_OSView = apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
+
+		await this.tryExecFFMpeg_async(inFilePath_OSView, outFilePath_OSView);
+		// await this.spawnFFMpeg(inFilePath, outFilePath);
+	}
+
+	getFFMpegOutFilePath_ObsidianView(inFile: TFile, format: '.png' | '.jpeg'): string {
+		var apis = this.apis;
+
+		var ffmpegNamePart = '-ffmpeg';
+		var outFileExtention = format;
+		var outFilePath_ObsidianView = 
+			apis.obsidianAPIs.concatDirectoryPathAndFileName_ObsidianView(
+				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
+				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + ffmpegNamePart + outFileExtention
+			);
+		return outFilePath_ObsidianView;
+	}
+
+	getFFMpegOutFilePath_OSView(outFilePath_ObsidianView: string): string {
+		return this.apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
+	}
+
+	private tryExecFFMpeg_async(inFilePath_OSView: string, outFilePath_OSView: string): Promise<void> {
+		return new Promise<void>(
+			(resolve, reject) => {
+				try {
+					var apis = this.apis;
+
+					var command = `ffmpeg -nostdin -i "${inFilePath_OSView}" -compression_level 100 -qscale:v 4 "${outFilePath_OSView}"`;
+					exec(command, (error: ExecException, stdout: string, stderr: string) => {
+						try {
+							if (error) {
+								console.log(error);
+								apis.reportLog('ffmpeg error', true, false, true);
+								throw new Error('report error');
+							}
+
+							access(outFilePath_OSView, (err) => {
+								try {
+									if (err) {
+										console.log(err);
+										apis.reportLog('expect ffmpeg output a file, but NOT', true, false, true);
+										throw new Error('report error');
+									}
+
+									resolve();
+								} catch(err) {
+									reject(err);
+								}
+							});
+						} catch(err) {
+							reject(err);
+						}
+					});
+				} catch(err) {
+					reject(err);
+				}
+			}
+		);
+	}
+
+	private spawnFFMpeg_async(inFilePath_OSView: string, outFilePath_OSView: string): Promise<void> {
+		return new Promise<void>(
+			(resolve, reject) => {
+				try {
+					var apis = this.apis;
+
+					var executable = 'ffmpeg';
+					var args = [
+						'-nostdin', 
+						'-i', inFilePath_OSView, 
+						'-compression_level', '100', 
+						'-qscale:v', '4', 
+						outFilePath_OSView
+					];
+					var process = spawn(executable, args);
+					process.on('close', (code: number | null) => {
+						try {
+							if (code && code >= 1) {
+								apis.reportLog('ffmpeg return code >= 1', true, false, true);
+								throw new Error('report error');
+							}
+
+							access(outFilePath_OSView, (err) => {
+								try {
+									if (err) {
+										console.log(err);
+										apis.reportLog('expect ffmpeg output a file, but NOT', true, false, true);
+										throw new Error('report error');
+									}
+
+									resolve();
+								} catch(err) {
+									reject(err);
+								}
+							});
+						} catch(err) {
+							reject(err);
+						}
+					});
+				} catch(err) {
+					reject(err);
+				}
+			}
+		);
+	}
+
+	// quality [between 0 and 1 - MDN web docs](https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toBlob)
+	async tryCompressImageWithCanvas_async(file: TFile, suffixName: '.jpeg' | '.png', quality: number = 0.8): Promise<void> {
+		var apis = this.apis;
+
+		var bytes = await apis.obsidianAPIs.readFileBinary_async(file);
+		var bytesArr = [bytes];
+		var blob = new Blob(bytesArr, {
+			"type": "image"
+		});
+		
+		await this.runCanvas_async(file, suffixName, quality, blob);
+	}
+
+	runCanvas_async(file: TFile, suffixName: '.jpeg' | '.png', quality: number, blob: Blob): Promise<void> {
+		return new Promise<void>(
+			(resolve, reject) => {
+				try {
+					var apis = this.apis;
+					var plugin = this;
+
+					var reader = new FileReader();
+					reader.onload = function (event: ProgressEvent<FileReader>): any {
+						try {
+							var maybeDataURL = event.target?.result;
+							if (!maybeDataURL || maybeDataURL instanceof ArrayBuffer) {
+								apis.reportLog('expect read string, but NOT', true, false, true);
+								throw new Error('report error');
+							}
+							// contains base64 data that represent a image
+							var dataURL: string = maybeDataURL;
+							// console.log(dataURL.toString());
+				
+							// [new Image() is equivalent to calling document.createElement('img'). - MDN web docs](https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement)
+							// [which is not attached to any DOM tree. - MDN web docs](https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement)
+							var image = new Image();
+							image.onload = (event: Event) => {
+								try {
+									var canvas = document.createElement('canvas');
+									var canvas2D = canvas.getContext('2d');
+									if (!canvas2D) {
+										apis.reportLog('canvas can NOT get canvas context', true, false, true);
+										throw new Error('report error');
+									}
+					
+									var imageWidth = image.width;
+									var imageHeight = image.height;
+					
+									canvas.width = imageWidth;
+									canvas.height = imageHeight;
+									// canvas2D.fillStyle = '#fff';
+									// canvas2D.fillRect(0, 0, imageWidth, imageHeight);
+									canvas2D.drawImage(
+										image, 
+										0, 0, imageWidth, imageHeight, 
+										0, 0, imageWidth, imageHeight);
+									
+									var mimeType = '';
+									if (suffixName == '.jpeg') {
+										mimeType = 'image/jpeg';
+									} else if (suffixName == '.png') {
+										mimeType = 'image/png';
+										quality = 1;
+									} else {
+										throw new Error('can NOT determine mime type');
+									}
+									canvas.toBlob((blobOrNull: Blob | null) => {
+										try {
+											if (!blobOrNull) {
+												apis.reportLog('canvas can NOT convert image to blob', true, false, true);
+												throw new Error('report error');
+											}
+											var blob: Blob = blobOrNull;
+											blob.arrayBuffer().then(
+												(bytes: ArrayBuffer) => {
+													var outFilePath_ObsidianView = plugin.getCanvasOutFilePath_ObsidianView(file, suffixName);
+													apis.obsidianAPIs.createFileIfNOTExist_async(outFilePath_ObsidianView, '').then(
+														(outFile: TFile) => {
+															apis.obsidianAPIs.writeFileBinary_async(outFile, bytes).then(
+																() => {
+																	var outFile = apis.obsidianAPIs.tryGetFile(outFilePath_ObsidianView);
+																	if (!outFile) {
+																		apis.reportLog('expect canvas output a file, but NOT', true, false, true);
+																		throw new Error('report error');
+																	}
+						
+																	resolve();
+																}
+															).catch(
+																reason => {
+																	apis.reportLog('canvas can NOT write to output file', true, false, true);
+																	throw new Error('report error');
+																}
+															);
+														}
+													).catch(
+														reason => {
+															apis.reportLog('canvas can NOT createFileIfNOTExist', true, false, true);
+															throw new Error('report error');
+														}
+													);
+												}
+											).catch(
+												reason => {
+													console.log(reason);
+													apis.reportLog('canvas can NOT convert Blob to ArrayBuffer', true, false, true);
+													throw new Error('report error');
+												}
+											);
+										} catch(err) {
+											reject(err);
+										}
+									}, mimeType, quality);
+								} catch(err) {
+									reject(err);
+								}
+							}
+							image.src = dataURL;
+						} catch(err) {
+							reject(err);
+						}
+					};
+					reader.readAsDataURL(blob);
+				} catch (err) {
+					reject(err);
+				}
+			}
+		);
+	}
+
+	getCanvasOutFilePath_ObsidianView(inFile: TFile, suffixName: '.jpeg' | '.png'): string {
+		var apis = this.apis;
+
+		var canvasNamePart = '-canvas';
+		var outFileExtention = suffixName;
+		var outFilePath_ObsidianView = 
+			apis.obsidianAPIs.concatDirectoryPathAndFileName_ObsidianView(
+				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
+				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + canvasNamePart + outFileExtention);
+		return outFilePath_ObsidianView;
+	}
+
+	getCanvasOutFilePath_OSView(outFilePath_ObsidianView: string): string {
+		return this.apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
+	}
+
+	async selectBestImage_async(candidateImagePaths: PathViewRecord[], strategy: 'min size' = 'min size'): Promise<PathViewRecord> {
+		if (strategy == 'min size') {
+			return await this.selectBestImage_selectMinSize_async(candidateImagePaths);
 		}
+
+		this.apis.reportLog(`when select best image, there is no such strategy: ${strategy}`, true, false, true);
+		throw new Error('report error');
 	}
 
-	// return count of modified file
-	async refreshAllLinks(): Promise<number> {
-		var mdfiles = app.vault.getMarkdownFiles();
-		var mdfilesIterator = mdfiles.values();
-		return await this.refreshAllLinks_recurse(mdfilesIterator);
-	}
+	private async selectBestImage_selectMinSize_async(candidateImagePaths: PathViewRecord[]): Promise<PathViewRecord> {
+		var apis = this.apis;
 
-	async refreshAllLinks_recurse(mdfilesIterator: IterableIterator<TFile>): Promise<number> {
-		var nextElementContainer = mdfilesIterator.next();
-		if (nextElementContainer.done) return 0;
-		var file: TFile = nextElementContainer.value;
-
-		var links = this.tryGetLinks(file);
-		if (!links || links.length == 0) {
-			return await this.refreshAllLinks_recurse(mdfilesIterator);
+		if (candidateImagePaths.length == 0) {
+			apis.reportLog('there is no candidate image', true, false, true);
+			throw new Error('report error');
 		}
 
-		var pairs: MisleadingLinkAndRealTarget[] = [];
-		links.forEach((link) => {
-			var targetFile = this.tryGetLinkTarget(link.link, file.path);
-			if (!targetFile) return;
-			var pair = new MisleadingLinkAndRealTarget(file, link, targetFile, this);
-			if (!pair.isNeedUpdate()) return;
-			pairs.push(pair);
-		})
-
-		if (pairs.length != 0) {
-			var linksChanged = await this.replaceLinksInFile(pairs, file);
-			var filesChanged = linksChanged >= 1 ? 1 : 0;
-			return await this.refreshAllLinks_recurse(mdfilesIterator) + filesChanged;
-		} else {
-			return await this.refreshAllLinks_recurse(mdfilesIterator);
+		var paths = candidateImagePaths;  // alias
+		var minSize_index = 0;  // when finding it's current found min, after finding it's min of all
+		var minSize = await apis.getSize_async(paths[minSize_index].path_OSView);
+		for(var i=1; i<candidateImagePaths.length; i++) {
+			var currentSize = await apis.getSize_async(paths[i].path_OSView);
+			if (currentSize < minSize) {
+				minSize_index = i;
+				minSize = currentSize;
+			}
 		}
+		return paths[minSize_index];
 	}
 
-	async updateFile(file: TFile, callback: (content: string) => string) {
-		await app.vault.process(file, callback);
+	async logFiles_compressionLog_async(inFile: TFile, outFilePaths: PathViewRecord[], bestOutFilePath: PathViewRecord) {
+		var apis = this.apis;
+
+		console.log('in file:');
+		console.log(inFile);
+		console.log('out file paths:');
+		console.log(outFilePaths);
+		console.log('best out file path:');
+		console.log(bestOutFilePath);
+
+		apis.reportLog(
+			`in file:\n` + 
+			`- name: ${apis.obsidianAPIs.getFileName_ObsidianView(inFile)}\n` + 
+			`- size: ${apis.obsidianAPIs.getFileSize(inFile)}\n` + 
+			`out files:\n` + 
+			`- count: ${outFilePaths.length}\n` + 
+			`best out file:\n` + 
+			`- name: ${apis.getName_OSView(bestOutFilePath.path_OSView)}\n` + 
+			`- size: ${this.fileSizeToReadableFileSize(await apis.getSize_async(bestOutFilePath.path_OSView))}\n`, 
+			false, true, true
+		);
 	}
 
-	async readFile(file: TFile): Promise<string> {
-		return await app.vault.read(file);
-	}
+	// return is replaced
+	async replaceInputFile_ifOutFileIsBetter_async(inFile: TFile, outFilePath_OSView: string): Promise<boolean> {
+		var apis = this.apis;
 
-	async writeFile(file: TFile, data: string) {
-		await app.vault.modify(file, data);
-	}
-
-	reportError(message: string, throwError: boolean = true) {
-		new Notice(message);
-		new Notice('see more log in console, \n' + 'Ctrl+Shift+I to open console');
-		console.log('=========== Error Report Start ===========');
-		console.log(message);
-		console.trace();
-		if (throwError)
-			throw new Error(message);
-	}
-
-	// await me to immediately return a async-function
-	async idle() {}
-
-	// TODO remove
-	async test() {
-		try {
-			new Notice('this is redirector');
-		} catch(err) {
-			console.log(err);
+		var inSize = apis.obsidianAPIs.getFileSize(inFile);
+		var outSize = await apis.getSize_async(outFilePath_OSView);
+		if (outSize < inSize) {
+			var outBytes = await apis.readBytes_async(outFilePath_OSView);
+			await apis.obsidianAPIs.writeFileBinary_async(inFile, outBytes);
+			return true;
 		}
-	}
-}
-
-class MisleadingLinkAndRealTarget {
-	readonly currentFile: TFile;
-	readonly misleadingLink: LinkCache;
-	readonly realTarget: TFile;
-	readonly plugin: RedirectorPlugin;
-
-	constructor(currentFile: TFile, misleadingLink: LinkCache, realTarget: TFile, plugin: RedirectorPlugin) {
-		this.currentFile = currentFile;
-		this.misleadingLink = misleadingLink;
-		this.realTarget = realTarget;
-		this.plugin = plugin;
+		return false;
 	}
 
-	getRealMarkdownLink(): string {
-		return this.plugin.generateMarkdownLink(this.realTarget, this.currentFile.path);
+	async cleanOutFiles_async(outFilePaths: PathViewRecord[]) {
+		var outFilePaths_ObsidianView: string[] = outFilePaths.map(
+			path => path.path_ObsidianView
+		)
+		var files = await this.apis.obsidianAPIs.waitUntilTFilesReady_async(
+			outFilePaths_ObsidianView, 
+			3000, 
+			300
+		);
+		await this.apis.obsidianAPIs.tryDeleteFiles_async(files);
 	}
 
-	isNeedUpdate(): boolean {
-		var real = this.getRealMarkdownLink();
-		var prev = this.misleadingLink.original;
-		return real != prev;
+	async loadSettings_async() {
+		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+	}
+	
+	async saveSettings_async() {
+		await this.saveData(this.settings);
+	}
+
+	isImageReadonly(image: TFile) {
+		var filename = this.apis.obsidianAPIs.getFileName_ObsidianView(image).toLowerCase();
+		var readonlyMark = this.settings.readonlyMark.toLowerCase();
+		return filename.contains(readonlyMark);
+	}
+
+	fileSizeToReadableFileSize(size: number): string {
+		var result: string = '';
+		var sizeStr = size.toString();
+
+		var partStart = sizeStr.length - 3;
+		var partEnd = sizeStr.length;  // exclusive
+		while(true) {
+			if (partStart <= 0) {
+				var part = sizeStr.substring(0, partEnd);
+				result = part + result;
+				break;
+			}
+
+			var part = sizeStr.substring(partStart, partEnd);
+			result = ', ' + part + result;
+			
+			partStart -= 3;
+			partEnd -= 3;
+		}
+
+		return result;
 	}
 }
