@@ -155,6 +155,16 @@ export class ObsidianAPIs {
 		});
 	}
 
+	async createDirectoryIfNOTExist_async(path: string): Promise<void> {
+		var dir = this.tryGetDirectory(path);
+		if (dir) return;
+		return await this.getVault().createFolder(path);
+	}
+
+	async createFolderIfNOTExist_async(path: string): Promise<void> {
+		return await this.createDirectoryIfNOTExist_async(path);
+	}
+
 	// [Move file to other locations dynamically using callbacks](https://forum.obsidian.md/t/move-file-to-other-locations-dynamically-using-callbacks/64334)
 	// change the path
 	async move_fileOrDirectory_async(fileOrDirectory: TAbstractFile, newPath: string) {
@@ -171,7 +181,7 @@ export class ObsidianAPIs {
 		var parentPath = fileOrDirectory.parent?.path;
 		if (!parentPath) parentPath = '';
 		// concat
-		var newPath = this.concatDirectoryPathAndFileName_ObsidianView(
+		var newPath = this.concatDirectoryPathAndItemName_ObsidianView(
 			parentPath, 
 			newName
 		);
@@ -395,7 +405,7 @@ export class ObsidianAPIs {
 		return normalizePath(path);
 	}
 
-	concatDirectoryPathAndFileName_ObsidianView(dirPath: string, fileName: string): string {
+	concatDirectoryPathAndItemName_ObsidianView(dirPath: string, fileOrDirName: string): string {
 		var concated: string = '';
 		// get path separator & normalize path
 		var sep = this.getPathSeparator_ObsidianView();
@@ -414,7 +424,7 @@ export class ObsidianAPIs {
 			}
 		}
 		// concat & normalize
-		concated = this.normalizePath_ObsidianView(dirPathAsPrefix + fileName);
+		concated = this.normalizePath_ObsidianView(dirPathAsPrefix + fileOrDirName);
 		// return
 		return concated;
 	}
@@ -475,6 +485,15 @@ export class ObsidianAPIs {
 		var vaultPath_OSView = this.getVaultPath_OSView();
 		var vaultToFile_OSView = path_ObsidianView;
 		return this.sharedAPIs.concatPath_OSView([vaultPath_OSView, vaultToFile_OSView]);
+	}
+
+	isSamePath_ObsidianView(path1: string, path2: string): boolean {
+		path1 = this.normalizePath_ObsidianView(path1);
+		path2 = this.normalizePath_ObsidianView(path2);
+		var sep = this.getPathSeparator_ObsidianView();
+		if (path1.endsWith(sep)) path1 = path1.substring(0, path1.length - sep.length);
+		if (path2.endsWith(sep)) path2 = path2.substring(0, path2.length - sep.length);
+		return path1 == path2;
 	}
 
 	// 1s == 1000ms

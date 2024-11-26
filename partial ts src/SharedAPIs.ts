@@ -10,11 +10,11 @@ export class SharedAPIs {
 		this.obsidianAPIs = new ObsidianAPIs(app, this);
 	}
 
-	reportLog(message: string, throwError: boolean = true, toastsNotice: boolean = true, logConsole: boolean = true) {
+	reportLog(message: string, throwError: boolean = true, toastsNotice: boolean = true, logConsole: boolean = true, logConsoleTrace: boolean = true) {
 		if (logConsole) {
 			console.log('=========== Report Start ===========');
 			console.log(message);
-			console.trace();
+			if (logConsoleTrace) console.trace();
 		}
 		if (toastsNotice) {
 			new Notice(message);
@@ -34,6 +34,15 @@ export class SharedAPIs {
 
 	getParentPath_OSView(path: string): string {
 		return dirname(path);
+	}
+
+	isSamePath_OSView(path1: string, path2: string): boolean {
+		path1 = this.normalizePath_OSView(path1);
+		path2 = this.normalizePath_OSView(path2);
+		var sep = this.getPathSeparator_OSView();
+		if (path1.endsWith(sep)) path1 = path1.substring(0, path1.length - sep.length);
+		if (path2.endsWith(sep)) path2 = path2.substring(0, path2.length - sep.length);
+		return path1 == path2;
 	}
 
 	getName_OSView(path: string): string {

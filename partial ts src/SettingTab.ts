@@ -51,5 +51,36 @@ export class SettingTab extends PluginSettingTab {
                         await this.plugin.saveSettings_async(); })
                     })
         
+        new Setting(containerEl)
+        .setName("Image Folder Name")
+        .setDesc("image-owner's pocket, put images into here")
+        .addText(text => {
+            text
+                .setValue(this.plugin.settings.imageFolderName)
+                .onChange(async newValue => {
+                        if (!this.plugin.isValidImageFolderNameSetting(newValue)) {
+                            new Notice(`"${newValue}" is NOT a valid folder name. use only a-z A-Z 0-9 ' ' '-' '_'`);
+                            if (this.plugin.isValidImageFolderNameSetting(this.plugin.settings.imageFolderName)) {
+                                text.setValue(this.plugin.settings.imageFolderName);
+                                return;
+                            } else {
+                                var empty = '';
+                                text.setValue(empty);
+                                if (this.plugin.settings.imageFolderName != empty) {
+                                    this.plugin.settings.imageFolderName = empty; 
+                                    await this.plugin.saveSettings_async();
+                                }
+                                return;
+                            }
+                        }
+                        if (this.plugin.settings.imageFolderName != newValue ) {
+                            this.plugin.settings.imageFolderName = newValue; 
+                            await this.plugin.saveSettings_async();
+                        }
+                    })
+                })
+        
     }
+
+
 }

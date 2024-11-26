@@ -9,6 +9,7 @@ import { PathViewRecord } from 'partial ts src/PathViewRecord';
 import { PluginSettings } from 'partial ts src/PluginSettings';
 import { SettingTab } from 'partial ts src/SettingTab';
 import { SharedAPIs } from './partial ts src/SharedAPIs';
+import { pid } from 'process';
 
 export default class KORCImageUtilPlugin extends Plugin {
 	settings: PluginSettings
@@ -71,6 +72,14 @@ export default class KORCImageUtilPlugin extends Plugin {
 			}
 		});
 
+		this.addCommand({
+			id: 'move-image-files-into-pocket',
+			name: 'Move images into owner\'s pocket',
+			callback: () => {
+				this.command_moveImagesPocket_async();
+			}
+		});
+
 		// this.addCommand({
 		// 	id: 'test',
 		// 	name: 'test',
@@ -99,7 +108,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 		// idle
 		await this.idle_async();
 
-		// get redirect files
+		// get image files
 		var images: TFile[] = await this.apis.obsidianAPIs.getAllImageFiles();
 		if (images.length == 0) {
 			new Notice('report finished, NO image is found');
@@ -126,13 +135,14 @@ export default class KORCImageUtilPlugin extends Plugin {
 	getReportText(
 			images: TFile[], reportFilePath: string, emptyReportText: string): string {
 		var reportText: string = emptyReportText;
-		var mapAndEntries: MapAndEntries<string, TFile[]> = this.linkImageAndOwner(images);
+		var mapAndEntries: MapAndEntries<string, TFile[]> = this.linkImageAndOwner(images, reportFilePath);
 		reportText += this.getReportText_1Image1Owner(mapAndEntries, reportFilePath, emptyReportText);
+		reportText += this.getReportText_imagesThatGetLostFromOwner(mapAndEntries, reportFilePath, emptyReportText);
 		return reportText;
 	}
 
 	// path_of_image to owners
-	linkImageAndOwner(images: TFile[]): MapAndEntries<string, TFile[]> {
+	linkImageAndOwner(images: TFile[], reportFilePath: string): MapAndEntries<string, TFile[]> {
 		var apis = this.apis;
 		var opis = apis.obsidianAPIs;
 
@@ -146,6 +156,12 @@ export default class KORCImageUtilPlugin extends Plugin {
 		// collect info for map
 		// check each md file
 		apis.obsidianAPIs.getMarkdownFiles().forEach((file, idx, files) => {
+			// skip report file
+			if (opis.isSamePath_ObsidianView(
+				opis.getFilePath_ObsidianView(file), 
+				reportFilePath
+			)) return;
+
 			// check each link
 			opis.tryGetInternalLinksDistinctByLinkTextAndTarget(file)?.forEach((link, idx, links) => {
 				// get path of target
@@ -250,6 +266,101 @@ export default class KORCImageUtilPlugin extends Plugin {
 		}
 		return reportText;
 	}
+
+	// should put images into owner's pocket
+	getReportText_imagesThatGetLostFromOwner(
+			mapAndEntries: MapAndEntries<string, TFile[]>, reportFilePath: string, emptyReportText: string): string {
+		if (this.settings.imageFolderName == '') return '';
+		if (!this.isValidImageFolderNameSetting(this.settings.imageFolderName)) return '';
+		
+		var apis = this.apis;
+		var opis = apis.obsidianAPIs;
+
+		var reportText: string = emptyReportText;
+
+		// build up report text
+		var badImageId = 1;
+		mapAndEntries.entries.forEach(entry => {
+			var imagePath = entry;
+			var owners = mapAndEntries.map.get(entry);
+			if (owners == null) throw new Error('expect owners not null');
+			var ownerCount = owners.length;
+
+			if (ownerCount == 1) {
+				var imageFile = opis.getFile(imagePath);
+				var owner = owners[0];
+				if (this.isImageGetLostFromOwner(imageFile, owner)) {
+					// ill
+					reportText += `### ${badImageId}\n`;
+					var imageMarkdownLink = opis.generateMarkdownLink(imageFile, reportFilePath);
+					reportText += `#### bad image\n${imageMarkdownLink}\n\n`;
+					reportText += `#### owner\n`;
+					var ownerMarkdownLink = opis.generateMarkdownLink(owner, reportFilePath);
+					reportText += `${ownerMarkdownLink}\n\n`;
+					badImageId++;
+				}
+			}
+		});
+
+		if (reportText != emptyReportText) {
+			// if any report, add extra-info
+			reportText = '## images that get lost from owner\n' + reportText;
+		}
+		return reportText;
+	}
+
+	// call it only when image folder name valid
+	private isImageGetLostFromOwner(image: TFile, owner: TFile): boolean {
+		if (this.settings.imageFolderName == '') throw new Error('empty image folder name, should NOT call this function');
+
+		var apis = this.apis;
+		var opis = apis.obsidianAPIs;
+		var imagePathOS = opis.getFilePath_OSView(image);
+		var ownerPathOS = opis.getFilePath_OSView(owner);
+		var ownerParentPathOS = apis.getParentPath_OSView(ownerPathOS);
+		var ownerPocketPathOS = apis.concatPath_OSView([
+			ownerParentPathOS, 
+			this.settings.imageFolderName
+		]);
+		var imageParentPath = apis.getParentPath_OSView(imagePathOS);
+		if (apis.isSamePath_OSView(imageParentPath, ownerPocketPathOS)) {
+			return false;
+		}
+		return true;
+	}
+
+	isValidImageFolderNameSetting(name: string): boolean {
+		if (name == '') return true;
+		if (this.isValidImageFolderName(name)) return true;
+		return false;
+    }
+
+    isValidImageFolderName(name: string): boolean {
+		// available char
+		// a-z A-Z 0-9 ' ' '-' '_'
+		var code0 = '0'.charCodeAt(0);
+		var code9 = '9'.charCodeAt(0);
+		var codeUA = 'A'.charCodeAt(0);
+		var codeUZ = 'Z'.charCodeAt(0);
+		var codela = 'a'.charCodeAt(0);
+		var codelz = 'z'.charCodeAt(0);
+		var codespace = ' '.charCodeAt(0);
+		var codemidline = '-'.charCodeAt(0);
+		var codelowline = '_'.charCodeAt(0);
+		for (var i = 0; i < name.length; i++) {
+			var ch = name[i];
+			var code = ch.charCodeAt(0);
+			if (!(	(codela <= code && code <= codelz) || 
+					(codeUA <= code && code <= codeUZ) || 
+					(code0 <= code && code <= code9) || 
+					code == codespace || 
+					code == codemidline || 
+					code == codelowline			)		) {
+				return false;
+			}
+		}
+		return true;
+    }
 
 	async handleReportText_async(reportFilePath: string, reportText: string, emptyReportText: string) {
 		if (reportText == emptyReportText) {
@@ -784,7 +895,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 			suffixName;
 		
 		var newPath = 
-			opis.concatDirectoryPathAndFileName_ObsidianView(
+			opis.concatDirectoryPathAndItemName_ObsidianView(
 				dirPath, newName
 			);
 		
@@ -814,7 +925,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 		var ditheringInfoNamePart = enableDithering ? '-dithering' : '-nodithering';
 		var outFileExtention = '.png';
 		var outFilePath_ObsidianView = 
-			apis.obsidianAPIs.concatDirectoryPathAndFileName_ObsidianView(
+			apis.obsidianAPIs.concatDirectoryPathAndItemName_ObsidianView(
 				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
 				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + pngQuantNamePart + ditheringInfoNamePart + outFileExtention
 			);
@@ -882,7 +993,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 		var ffmpegNamePart = '-ffmpeg';
 		var outFileExtention = format;
 		var outFilePath_ObsidianView = 
-			apis.obsidianAPIs.concatDirectoryPathAndFileName_ObsidianView(
+			apis.obsidianAPIs.concatDirectoryPathAndItemName_ObsidianView(
 				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
 				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + ffmpegNamePart + outFileExtention
 			);
@@ -1113,7 +1224,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 		var canvasNamePart = '-canvas';
 		var outFileExtention = suffixName;
 		var outFilePath_ObsidianView = 
-			apis.obsidianAPIs.concatDirectoryPathAndFileName_ObsidianView(
+			apis.obsidianAPIs.concatDirectoryPathAndItemName_ObsidianView(
 				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
 				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + canvasNamePart + outFileExtention);
 		return outFilePath_ObsidianView;
@@ -1200,6 +1311,79 @@ export default class KORCImageUtilPlugin extends Plugin {
 			300
 		);
 		await this.apis.obsidianAPIs.tryDeleteFiles_async(files);
+	}
+
+	async command_moveImagesPocket_async() {
+		// idle
+		await this.idle_async();
+
+		// move
+		this.apis.reportLog(`move start`, false, false, true, false);
+		var countMoved = await this.moveImagesIntoPocket_async();
+		this.apis.reportLog(`move finished, ${countMoved} images is moved`, false, true, true, false);
+	}
+
+	async moveImagesIntoPocket_async(): Promise<number> {
+		var apis = this.apis;
+		var opis = apis.obsidianAPIs;
+
+		if (this.settings.imageFolderName == '') {
+			apis.reportLog('abort. please set image-folder-name in the setting-tab', true, true, true, false);
+			return 0;
+		}
+		if (!this.isValidImageFolderNameSetting(this.settings.imageFolderName)) {
+			apis.reportLog('abort. invalid image-folder-name', true, true, true, false);
+			return 0;
+		}
+
+		// get images
+		var images: TFile[] = await this.apis.obsidianAPIs.getAllImageFiles();
+		if (images.length == 0) {
+			return 0;
+		}
+
+		var mapAndEntries: MapAndEntries<string, TFile[]> = this.linkImageAndOwner(images, this.reportPath);
+
+		var countMoved = 0;
+		var entries = mapAndEntries.entries;
+		var entriesLen = entries.length;
+		for (let i = 0; i < entriesLen; i++) {
+			var entry = entries[i];
+			var imagePath = entry;
+			var owners = mapAndEntries.map.get(entry);
+			if (owners == null) throw new Error('expect owners not null');
+			var ownerCount = owners.length;
+
+			if (ownerCount == 1) {
+				var imageFile = opis.getFile(imagePath);
+				var owner = owners[0];
+				if (this.isImageGetLostFromOwner(imageFile, owner)) {
+					// ill
+					var imageName = opis.getFileName_ObsidianView(imageFile);
+					var imagePath = opis.getFilePath_ObsidianView(imageFile);
+					var ownerParentPath = '';
+					var ownerParent = owner.parent;
+					if (ownerParent) {
+						ownerParentPath = ownerParent.path;
+					}
+					var ownerPocketPath = opis.concatDirectoryPathAndItemName_ObsidianView(
+						ownerParentPath, 
+						this.settings.imageFolderName
+					);
+					var correctImagePath = opis.concatDirectoryPathAndItemName_ObsidianView(
+						ownerPocketPath, 
+						imageName
+					);
+					apis.reportLog(`moving "${imageName}" \n to "${correctImagePath}" \n from "${imagePath}"`, false, false, true, false);
+					await opis.createDirectoryIfNOTExist_async(ownerPocketPath);
+					await opis.move_fileOrDirectory_async(imageFile, correctImagePath);
+					apis.reportLog(`moved "${imageName}" \n to "${correctImagePath}" \n from "${imagePath}"`, false, false, true, false);
+					countMoved++;
+				}
+			}
+		}
+
+		return countMoved;
 	}
 
 	async loadSettings_async() {
