@@ -691,7 +691,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 				}
 			}
 
-			// pngquant origin png true
+			// pngquant compress-origin-png dithering
 			var isPngquantOriginTrueAvailable = false;
 			await (this.tryCompressImageWithPNGQuant_async(imageFile, true).catch(
 				reason => {
@@ -708,7 +708,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 				outFilePaths.push(outFilePath);
 			}
 
-			// pngquant origin png false
+			// pngquant compress-origin-png no-dithering
 			var isPngquantOriginFalseAvailable = false;
 			await (this.tryCompressImageWithPNGQuant_async(imageFile, false).catch(
 				reason => {
@@ -731,7 +731,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 					3000
 				))[0]
 
-				// pngquant origin png true
+				// pngquant compress-canvas-png dithering
 				await (this.tryCompressImageWithPNGQuant_async(canvasPngOut, true).catch(
 					reason => {
 						this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
@@ -746,7 +746,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 					outFilePaths.push(outFilePath);
 				}
 
-				// pngquant origin png false
+				// pngquant compress-canvas-png no-dithering
 				await (this.tryCompressImageWithPNGQuant_async(canvasPngOut, false).catch(
 					reason => {
 						this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
@@ -942,7 +942,13 @@ export default class KORCImageUtilPlugin extends Plugin {
 				try{
 					var apis = this.apis;
 		
-					var command = `pngquant.exe --skip-if-larger ${enableDithering ? '' : '--ordered'} --speed=1 --quality=45-85 "--output=${outFilePath_OSView}" "${inFilePath_OSView}"`;
+					var pngquant = '"' + apis.concatPath_OSView([
+						apis.obsidianAPIs.getVaultPath_OSView(), 
+						'04_Executable', 
+						'pngquant.exe'
+					]) + '"';
+
+					var command = `${pngquant} --skip-if-larger ${enableDithering ? '' : '--ordered'} --speed=1 --quality=45-85 "--output=${outFilePath_OSView}" "${inFilePath_OSView}"`;
 					exec(command, (error: ExecException, stdout: string, stderr: string) => {
 						try {
 							if (error) {
@@ -1010,7 +1016,13 @@ export default class KORCImageUtilPlugin extends Plugin {
 				try {
 					var apis = this.apis;
 
-					var command = `ffmpeg -nostdin -i "${inFilePath_OSView}" -compression_level 100 -qscale:v 4 "${outFilePath_OSView}"`;
+					var ffmpeg = '"' + apis.concatPath_OSView([
+						apis.obsidianAPIs.getVaultPath_OSView(), 
+						'04_Executable', 
+						'ffmpeg.exe'
+					]) + '"';
+
+					var command = `${ffmpeg} -nostdin -i "${inFilePath_OSView}" -compression_level 100 -qscale:v 4 "${outFilePath_OSView}"`;
 					exec(command, (error: ExecException, stdout: string, stderr: string) => {
 						try {
 							if (error) {
