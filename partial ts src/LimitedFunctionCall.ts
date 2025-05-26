@@ -9,7 +9,7 @@ export class LimitedFunctionCall {
 
 	constructor(plugin: KORCImageUtilPlugin, maxCalledLimit: number = 20) {
 		this.plugin = plugin;
-		this.apis = plugin.apis;
+		this.apis = plugin.sharedAPIs;
 		this.maxCalledLimit = maxCalledLimit;
 	}
 

@@ -1,8 +1,8 @@
 import { PluginSettings } from "./PluginSettings";
 
-export const DEFAULT_SETTINGS: Partial<PluginSettings> = {
+export const DEFAULT_SETTINGS: PluginSettings = {
     compressAndRenameImageWhenPaste: false,
-    pngOnly: false,
     readonlyMark: '.readonly.',
-    imageFolderName: '',
+    imageDirectoryName_OSView: '',
+	executableDirectoryRelativePath_OSView: ''
 };

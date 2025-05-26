@@ -10,19 +10,28 @@ import { PluginSettings } from 'partial ts src/PluginSettings';
 import { SettingTab } from 'partial ts src/SettingTab';
 import { SharedAPIs } from './partial ts src/SharedAPIs';
 import { pid } from 'process';
+import {ObsidianAPIs} from "./partial ts src/ObsidianAPIs";
+import {PluginAPIs} from "./partial ts src/PluginAPIs";
 
 export default class KORCImageUtilPlugin extends Plugin {
-	settings: PluginSettings
-	apis: SharedAPIs;
+	settings: PluginSettings;
+	DEFAULT_SETTINGS: PluginSettings;
+	pluginAPIs: PluginAPIs;
+	sharedAPIs: SharedAPIs;
+	obsidianAPIs: ObsidianAPIs;
 	limitedFunctionCall: LimitedFunctionCall;
 	// seriallyExecutor: SeriallyExecutor_ForPromise;
 	oneMainTaskOneTime: OneTaskOneTime;
 	oneCompressionTaskOneTime: OneTaskOneTime;
 	oneCompressionAllTaskOneTime: OneTaskOneTime;
+	oneCommandOneTime: OneTaskOneTime;
 
 	async onload() {
-		this.apis = new SharedAPIs(this.app);
+		this.pluginAPIs = new PluginAPIs(this);
+		this.sharedAPIs = this.pluginAPIs.sharedAPIs;
+		this.obsidianAPIs = this.sharedAPIs.obsidianAPIs;
 
+		this.DEFAULT_SETTINGS = DEFAULT_SETTINGS;
 		await this.loadSettings_async();
 		this.addSettingTab(new SettingTab(this.app, this));
 
@@ -32,9 +41,11 @@ export default class KORCImageUtilPlugin extends Plugin {
 		this.oneCompressionTaskOneTime = new OneTaskOneTime();
 		this.oneCompressionAllTaskOneTime = new OneTaskOneTime();
 
-		this.apis.obsidianAPIs.getWorkspace().onLayoutReady(
+		this.oneCommandOneTime = new OneTaskOneTime();
+
+		this.sharedAPIs.obsidianAPIs.getWorkspace().onLayoutReady(
 			() => {
-				this.registerEvent(this.apis.obsidianAPIs.getVault().on("create", 
+				this.registerEvent(this.sharedAPIs.obsidianAPIs.getVault().on("create",
 					this.createFileOrDir_callback_async.bind(this)
 				));
 			}
@@ -44,7 +55,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 			id: 'compress-all-images',
 			name: 'Compress all images',
 			callback: () => {
-				this.tryCompressAllImagesInVault_oneTaskOneTime_async(true);
+				this.tryCompressAllImagesInVault_command_async();
 			}
 		});
 
@@ -52,7 +63,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 			id: 'rename-images-in-current-file',
 			name: 'Rename images in current-file',
 			callback: () => {
-				this.tryRenameImagesInCurrentFile_async(true);
+				this.tryRenameImagesInCurrentFile_async();
 			}
 		});
 
@@ -60,7 +71,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 			id: 'fix-all-image-suffix-names',
 			name: 'Fix all image-suffix-names',
 			callback: () => {
-				this.tryFixAllImageSuffixName_async(true);
+				this.tryFixAllImageSuffixName_async();
 			}
 		});
 
@@ -105,21 +116,33 @@ export default class KORCImageUtilPlugin extends Plugin {
 	parentOfReport_path: string = "";
 	reportPath: string = this.parentOfReport_path + this.reportName;
 	async command_reportImages_async() {
-		// idle
-		await this.idle_async();
-
-		// get image files
-		var images: TFile[] = await this.apis.obsidianAPIs.getAllImageFiles();
-		if (images.length == 0) {
-			new Notice('report finished, NO image is found');
+		try {
+			if (this.oneCommandOneTime.alreadyHasOneRunningTask()) return;
+			this.oneCommandOneTime.knowATaskIsRunning();
+		} catch (error) {
 			return;
 		}
-		
-		// report
-		await this.reportImages_async(images, this.reportPath, this.reportName, this.parentOfReport_path);
+		try {
+			// idle
+			await this.idle_async();
+
+			// get image files
+			const images: TFile[] = await this.sharedAPIs.obsidianAPIs.getAllImageFiles();
+			if (images.length == 0) {
+				new Notice('report finished, NO image is found');
+				return;
+			}
+
+			// report
+			await this.reportImages_async(images, this.reportPath, this.reportName, this.parentOfReport_path);
+		} catch (error) {
+			// ...
+		} finally {
+			this.oneCommandOneTime.knowThatTaskEnd();
+		}
 	}
 
-	async reportImages_async(images: TFile[], 
+	async reportImages_async(images: TFile[],
 			reportFilePath: string, reportName: string, parentOfReport_path: string) {
 		// delete report-file if exist
 		await this.removeReportFile_async(reportFilePath);
@@ -129,7 +152,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 	}
 
 	async removeReportFile_async(reportFilePath: string) {
-		await this.apis.obsidianAPIs.deleteFileIfExist_async(reportFilePath);
+		await this.sharedAPIs.obsidianAPIs.deleteFileIfExist_async(reportFilePath);
 	}
 
 	getReportText(
@@ -143,7 +166,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 
 	// path_of_image to owners
 	linkImageAndOwner(images: TFile[], reportFilePath: string): MapAndEntries<string, TFile[]> {
-		var apis = this.apis;
+		var apis = this.sharedAPIs;
 		var opis = apis.obsidianAPIs;
 
 		// map
@@ -199,7 +222,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 	// should NOT 2-or-more note link to 1 image
 	getReportText_imagesThat2OrMoreOwner(
 			mapAndEntries: MapAndEntries<string, TFile[]>, reportFilePath: string, emptyReportText: string): string {
-		var apis = this.apis;
+		var apis = this.sharedAPIs;
 		var opis = apis.obsidianAPIs;
 
 		var reportText: string = emptyReportText;
@@ -215,7 +238,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 			if (ownerCount >= 2) {
 				// ill
 				reportText += `### ${badImageId}\n`;
-				var imageFile = opis.getFile(imagePath);
+				var imageFile = opis.getFile_ObsidianView(imagePath);
 				var imageMarkdownLink = opis.generateMarkdownLink(imageFile, reportFilePath);
 				reportText += `#### bad image\n${imageMarkdownLink}\n\n`;
 				reportText += `#### owners\n`;
@@ -237,7 +260,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 	// should NOT no note link to 1 image
 	getReportText_imagesThat0Owner(
 			mapAndEntries: MapAndEntries<string, TFile[]>, reportFilePath: string, emptyReportText: string): string {
-		var apis = this.apis;
+		var apis = this.sharedAPIs;
 		var opis = apis.obsidianAPIs;
 
 		var reportText: string = emptyReportText;
@@ -253,7 +276,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 			if (ownerCount == 0) {
 				// ill
 				reportText += `### ${badImageId}\n`;
-				var imageFile = opis.getFile(imagePath);
+				var imageFile = opis.getFile_ObsidianView(imagePath);
 				var imageMarkdownLink = opis.generateMarkdownLink(imageFile, reportFilePath);
 				reportText += `#### bad image\n${imageMarkdownLink}\n\n`;
 				badImageId++;
@@ -270,10 +293,9 @@ export default class KORCImageUtilPlugin extends Plugin {
 	// should put images into owner's pocket
 	getReportText_imagesThatGetLostFromOwner(
 			mapAndEntries: MapAndEntries<string, TFile[]>, reportFilePath: string, emptyReportText: string): string {
-		if (this.settings.imageFolderName == '') return '';
-		if (!this.isValidImageFolderNameSetting(this.settings.imageFolderName)) return '';
-		
-		var apis = this.apis;
+		if (!this.pluginAPIs.validOwnerPocket()) return '';
+
+		var apis = this.sharedAPIs;
 		var opis = apis.obsidianAPIs;
 
 		var reportText: string = emptyReportText;
@@ -287,9 +309,9 @@ export default class KORCImageUtilPlugin extends Plugin {
 			var ownerCount = owners.length;
 
 			if (ownerCount == 1) {
-				var imageFile = opis.getFile(imagePath);
+				var imageFile = opis.getFile_ObsidianView(imagePath);
 				var owner = owners[0];
-				if (this.isImageGetLostFromOwner(imageFile, owner)) {
+				if (this.isImageGetLostFromOwnerPocket(imageFile, owner)) {
 					// ill
 					reportText += `### ${badImageId}\n`;
 					var imageMarkdownLink = opis.generateMarkdownLink(imageFile, reportFilePath);
@@ -309,98 +331,55 @@ export default class KORCImageUtilPlugin extends Plugin {
 		return reportText;
 	}
 
-	// call it only when image folder name valid
-	private isImageGetLostFromOwner(image: TFile, owner: TFile): boolean {
-		if (this.settings.imageFolderName == '') throw new Error('empty image folder name, should NOT call this function');
-
-		var apis = this.apis;
-		var opis = apis.obsidianAPIs;
-		var imagePathOS = opis.getFilePath_OSView(image);
-		var ownerPathOS = opis.getFilePath_OSView(owner);
-		var ownerParentPathOS = apis.getParentPath_OSView(ownerPathOS);
-		var ownerPocketPathOS = apis.concatPath_OSView([
-			ownerParentPathOS, 
-			this.settings.imageFolderName
-		]);
-		var imageParentPath = apis.getParentPath_OSView(imagePathOS);
-		if (apis.isSamePath_OSView(imageParentPath, ownerPocketPathOS)) {
-			return false;
-		}
-		return true;
+	// call it only when owner pocket exist
+	private isImageGetLostFromOwnerPocket(image: TFile, owner: TFile): boolean {
+		const t = this.pluginAPIs.tryGetOwnerPocketPath_OSView(owner);
+		if (typeof t != "string") throw new Error(
+			`call this function is NOT allowed when cant find owner pocket${
+				t != null ? ", cant find because " + t.message : ''
+			}`
+		);
+		const ownerPocketPathOS = t;
+		const imagePathOS = this.obsidianAPIs.getFilePath_OSView(image);
+		const imageParentPath = this.sharedAPIs.getParentPath_OSView(imagePathOS);
+		return !this.sharedAPIs.isSamePath_OSView(imageParentPath, ownerPocketPathOS);
 	}
-
-	isValidImageFolderNameSetting(name: string): boolean {
-		if (name == '') return true;
-		if (this.isValidImageFolderName(name)) return true;
-		return false;
-    }
-
-    isValidImageFolderName(name: string): boolean {
-		// available char
-		// a-z A-Z 0-9 ' ' '-' '_'
-		var code0 = '0'.charCodeAt(0);
-		var code9 = '9'.charCodeAt(0);
-		var codeUA = 'A'.charCodeAt(0);
-		var codeUZ = 'Z'.charCodeAt(0);
-		var codela = 'a'.charCodeAt(0);
-		var codelz = 'z'.charCodeAt(0);
-		var codespace = ' '.charCodeAt(0);
-		var codemidline = '-'.charCodeAt(0);
-		var codelowline = '_'.charCodeAt(0);
-		for (var i = 0; i < name.length; i++) {
-			var ch = name[i];
-			var code = ch.charCodeAt(0);
-			if (!(	(codela <= code && code <= codelz) || 
-					(codeUA <= code && code <= codeUZ) || 
-					(code0 <= code && code <= code9) || 
-					code == codespace || 
-					code == codemidline || 
-					code == codelowline			)		) {
-				return false;
-			}
-		}
-		return true;
-    }
 
 	async handleReportText_async(reportFilePath: string, reportText: string, emptyReportText: string) {
 		if (reportText == emptyReportText) {
 			new Notice("report finished, nothing to report");
 			return;
 		}
-		var reportFile = await this.apis.obsidianAPIs.createFile_async(reportFilePath, reportText);
-		await this.apis.obsidianAPIs.openFile_async(reportFile);
+		var reportFile = await this.sharedAPIs.obsidianAPIs.createFile_async(reportFilePath, reportText);
+		await this.sharedAPIs.obsidianAPIs.openFile_async(reportFile);
 		new Notice("report finished, see report-file");
 	}
 
-	async tryFixAllImageSuffixName_async(isMainTask: boolean = true) {
+	async tryFixAllImageSuffixName_async() {
 		try {
-			if (isMainTask) {
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
-					this.apis.reportLog('already exist a running main task', false, true, true);
-					return;
-				}
-				this.oneMainTaskOneTime.knowATaskIsRunning();
-			}
-
-			const images = this.apis.obsidianAPIs.getAllImageFiles();
-			var countModified = 0;
-			for(var i=0; i<images.length; ++i) {
-				var image = images[i];
+			if (this.oneCommandOneTime.alreadyHasOneRunningTask()) return;
+			this.oneCommandOneTime.knowATaskIsRunning();
+		} catch (error) {
+			return;
+		}
+		try {
+			const images = this.sharedAPIs.obsidianAPIs.getAllImageFiles();
+			let countModified = 0;
+			for(let i=0; i<images.length; ++i) {
+				const image = images[i];
 				try {
-					var isModified = await this.tryFixAImageSuffixName_async(image);
+					const isModified = await this.tryFixAImageSuffixName_async(image);
 					if (isModified) countModified++;
 				} catch(e) {
-					this.apis.reportLog(`can NOT fix ${image.name} at ${image.path}`, false, false, true);
+					this.sharedAPIs.reportLog(`can NOT fix ${image.name} at ${image.path}`, false, false, true, false);
 				}
 			}
-			this.apis.reportLog(`Fix Finished, \n${countModified} image-suffix-names are fixed`, false, true, true);
+			this.sharedAPIs.reportLog(`Fix Finished, \n${countModified} image-suffix-names are fixed`, false, true, true, false);
 		} catch(error) {
-			this.apis.reportLog('Fix Interrupted', false, true, true);
+			this.sharedAPIs.reportLog('Fix Interrupted', false, true, true, false);
 			console.log(error);
 		} finally {
-			if (isMainTask)
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
-					this.oneMainTaskOneTime.knowThatTaskEnd();
+			this.oneCommandOneTime.knowThatTaskEnd();
 		}
 	}
 
@@ -413,7 +392,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 					return;
 				}
 
-				var apis = this.apis;
+				var apis = this.sharedAPIs;
 				var opis = apis.obsidianAPIs;
 
 				opis.readFileBinary_async(image).then(
@@ -440,7 +419,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 									var jpegSuffix = '.jpeg';
 									var curSuffix = opis.getFileDotStartSuffixName_ObsidianView(image);
 									if (curSuffix != jpegSuffix) {
-										this.apis.obsidianAPIs.renameFileSuffixName_async(image, jpegSuffix).then(
+										this.sharedAPIs.obsidianAPIs.renameFileSuffixName_async(image, jpegSuffix).then(
 											() => {
 												console.log(`rename ${image.name} at ${image.path} suffix from ${curSuffix} to ${jpegSuffix}`);
 												resolve(true);
@@ -456,7 +435,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 									var pngSuffix = '.png';
 									var curSuffix = opis.getFileDotStartSuffixName_ObsidianView(image);
 									if (curSuffix != pngSuffix) {
-										this.apis.obsidianAPIs.renameFileSuffixName_async(image, pngSuffix).then(
+										this.sharedAPIs.obsidianAPIs.renameFileSuffixName_async(image, pngSuffix).then(
 											() => {
 												console.log(`rename ${image.name} at ${image.path} suffix from ${curSuffix} to ${pngSuffix}`);
 												resolve(true);
@@ -480,90 +459,77 @@ export default class KORCImageUtilPlugin extends Plugin {
 		)
 	}
 
-	async tryRenameImagesInCurrentFile_async(isMainTask: boolean = true) {
+	async tryRenameImagesInCurrentFile_async() {
 		try {
-			if (isMainTask) {
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
-					this.apis.reportLog('already exist a running main task', false, true, true);
-					return;
-				}
-				this.oneMainTaskOneTime.knowATaskIsRunning();
-			}
-
-			var apis = this.apis;
-			var opis = apis.obsidianAPIs;
-
-			var mdview = opis.getActiveMarkdownView();
-			var file = mdview.file;
-			var linksDistinct = opis.tryGetInternalLinksDistinctByLinkTextAndTarget(file);
+			if (this.oneCommandOneTime.alreadyHasOneRunningTask()) return;
+			this.oneCommandOneTime.knowATaskIsRunning();
+		} catch (error) {
+			return;
+		}
+		try {
+			const mdview = this.pluginAPIs.sharedAPIs.obsidianAPIs.getActiveMarkdownView();
+			const curFile = mdview.file;
+			const linksDistinct = this.pluginAPIs.sharedAPIs.obsidianAPIs.tryGetInternalLinksDistinctByLinkTextAndTarget(curFile);
 			if (linksDistinct) {
-				var images: TFile[] = [];
+				const images: TFile[] = [];
 				linksDistinct.forEach(
 					link => {
-						var target = opis.tryGetLinkTarget(link.link, file.path);
+						const target = this.pluginAPIs.sharedAPIs.obsidianAPIs.tryGetLinkTarget(link.link, curFile.path);
 						if (!target) return;
-						if (!opis.isImage(target)) return;
+						if (!this.pluginAPIs.sharedAPIs.obsidianAPIs.isImage(target)) return;
 						images.push(target);
 					}
 				);
-				for(var i=0; i<images.length; i++) {
-					var image = images[i];
+				for(let i=0; i<images.length; i++) {
+					const image = images[i];
 					try {
-						await this.retryable_renameImage_aysnc(image, image.extension, file);
+						await this.pluginAPIs.compressAPIs.compressorRenamer.renamer.tryRenameImage(
+							image,
+							this.pluginAPIs.sharedAPIs.getDotStartSuffixName_OSView(this.pluginAPIs.sharedAPIs.obsidianAPIs.getFilePath_OSView(image)),
+							true,
+							curFile
+						);
 					} catch(e) {
-						this.apis.reportLog(`failed to rename "${image.name}" at "${image.path}" because: \n${e}`, false, true, true);
+						this.sharedAPIs.reportLog(`failed to rename "${image.name}" at "${image.path}" because: \n${e}`, false, true, true, false);
 					}
 				}
 			}
-			this.apis.reportLog('Rename Finished', false, true, true);
+			this.sharedAPIs.reportLog('Rename Finished', false, true, true);
 		} catch(error) {
-			this.apis.reportLog('Rename Interrupted', false, true, true);
+			this.sharedAPIs.reportLog('Rename Interrupted', false, true, true);
 			console.log(error);
 		} finally {
-			if (isMainTask)
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
-					this.oneMainTaskOneTime.knowThatTaskEnd();
+			this.oneCommandOneTime.knowThatTaskEnd();
 		}
 	}
 
 	// if already task, abort
 	// if no task, immediately start a new task, async completed
-	async tryCompressAllImagesInVault_oneTaskOneTime_async(isMainTask: boolean = true) {
+	async tryCompressAllImagesInVault_command_async() {
 		try {
-			if (isMainTask) {
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
-					this.apis.reportLog('already exist a running main task', false, true, true);
-					return;
+			if (this.oneCommandOneTime.alreadyHasOneRunningTask()) return;
+			this.oneCommandOneTime.knowATaskIsRunning();
+		} catch (error) {
+			return;
+		}
+		try {
+			const images = this.sharedAPIs.obsidianAPIs.getAllImageFiles();
+			for(let i=0; i<images.length; ++i) {
+				const image = images[i];
+				try {
+					const r = await this.pluginAPIs.compressAPIs.compressorRenamer.tryCompressImageThenRename_AloneExecute_async(image);
+					if (r instanceof Error) { throw r; }
+				} catch (e) {
+					console.log(`can NOT compress "${image.name}" at "${image.path}" because:`);
+					console.log(e);
 				}
-				this.oneMainTaskOneTime.knowATaskIsRunning();
 			}
-
-			if (this.oneCompressionAllTaskOneTime.alreadyHasOneRunningTask()) {
-				this.apis.reportLog('already exist a running compression task', false, true, true);
-				return;
-			}
-			this.oneCompressionAllTaskOneTime.knowATaskIsRunning();
-
-			const images = this.apis.obsidianAPIs.getAllImageFiles();
-			for(var i=0; i<images.length; ++i) {
-				var image = images[i];
-				await this.tryCompress_oneTaskOneTime_async(image, false, false).catch(
-					e => {
-						console.log(e);
-						this.apis.reportLog(`can NOT compress ${image.name} at ${image.path}`, false, false, true);
-					}
-				);
-			}
-			this.apis.reportLog('Compression Finished', false, true, true);
+			this.sharedAPIs.reportLog('Compression Finished', false, true, true, false);
 		} catch(error) {
-			this.apis.reportLog('Compression Interrupted', false, true, true);
+			this.sharedAPIs.reportLog('Compression Interrupted', false, true, true, false);
 			console.log(error);
 		} finally {
-			if (this.oneCompressionAllTaskOneTime.alreadyHasOneRunningTask())
-				this.oneCompressionAllTaskOneTime.knowThatTaskEnd();
-			if (isMainTask)
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
-					this.oneMainTaskOneTime.knowThatTaskEnd();
+			this.oneCommandOneTime.knowThatTaskEnd();
 		}
 	}
 
@@ -574,260 +540,72 @@ export default class KORCImageUtilPlugin extends Plugin {
 	}
 
 	async createFile_callback_async(file: TFile) {
-		if (this.apis.obsidianAPIs.isImage(file)) {
-			var imageFile: TFile = file;
+		if (this.sharedAPIs.obsidianAPIs.isImage(file)) {
+			const imageFile: TFile = file;
 			await this.createImageFile_callback_async(imageFile);
 		}
 	}
 
 	async createImageFile_callback_async(imageFile: TFile) {
-		if(this.oneCompressionTaskOneTime.alreadyHasOneRunningTask()) {
-			await this.createImageWhenCompressionTaskRunning_callback_async(imageFile);
+		if(this.oneCommandOneTime.alreadyHasOneRunningTask()) {
+			await this.createImageWhenCommandRunning_callback_async(imageFile);
 		} else {
-			await this.createImageWhenNOCompressionTask_callback_async(imageFile);
+			await this.createImageWhenNOCommand_callback_async(imageFile);
 		}
 	}
 
-	async createImageWhenCompressionTaskRunning_callback_async(imageFile: TFile) {
+	async createImageWhenCommandRunning_callback_async(imageFile: TFile) {
 		return;
 	}
 
-	async createImageWhenNOCompressionTask_callback_async(imageFile: TFile): Promise<void> {
+	async createImageWhenNOCommand_callback_async(imageFile: TFile): Promise<void> {
 		if (!this.settings.compressAndRenameImageWhenPaste) return;
-		await this.tryCompress_oneTaskOneTime_async(imageFile, true, true);
+		await this.tryCompress_command_async(imageFile);
 	}
 
 	// if already task, abort
 	// if reach recursion limit, abort
 	// if no task, immediately start a new task, async completed
-	async tryCompress_oneTaskOneTime_async(imageFile: TFile, tryRename: boolean = true, isMainTask: boolean = true) {
-		var outFilePaths: PathViewRecord[] = [];
+	async tryCompress_command_async(imageFile: TFile) {
 		try {
-			if (isMainTask) {
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask()) {
-					this.apis.reportLog('already exist a running main task', false, true, true);
-					return;
-				}
-				this.oneMainTaskOneTime.knowATaskIsRunning();
-			}
-
-			if (this.oneCompressionTaskOneTime.alreadyHasOneRunningTask()) {
-				this.apis.reportLog('already exist a running compression task', true, false, true);
-				return;
-			}
-			this.oneCompressionTaskOneTime.knowATaskIsRunning();
-
-			this.limitedFunctionCall.ensureNoEndlessRecursion();
-
-			if (this.isImageReadonly(imageFile)) return;
-
-			var outFilePath;
-
-			// canvas jpeg
-			if (!this.settings.pngOnly) {
-				await (this.tryCompressImageWithCanvas_async(imageFile, '.jpeg', 0.8).catch(
-					reason => {
-						this.apis.reportLog(`failed to compress using canvas because:`, false, false, true);
-						console.log(reason);
-					}
-				));
-				outFilePath = new PathViewRecord(
-					this.getCanvasOutFilePath_ObsidianView(imageFile, '.jpeg'), 
-					this.apis
-				);
-				if (await this.apis.exist_async(outFilePath.path_OSView)) {
-					outFilePaths.push(outFilePath);
-				}
-			}
-
-			// canvas png
-			var isCanvasPngAvailable = false;
-			var canvasPngOutFilePath: PathViewRecord | null = null;
-			await (this.tryCompressImageWithCanvas_async(imageFile, '.png').catch(
-				reason => {
-					this.apis.reportLog(`failed to compress using canvas because:`, false, false, true);
-					console.log(reason);
-				}
-			));
-			outFilePath = new PathViewRecord(
-				this.getCanvasOutFilePath_ObsidianView(imageFile, '.png'), 
-				this.apis
-			);
-			if (await this.apis.exist_async(outFilePath.path_OSView)) {
-				isCanvasPngAvailable = true;
-				canvasPngOutFilePath = outFilePath;
-				outFilePaths.push(outFilePath);
-			}
-
-			// ffmpeg png
-			await (this.tryCompressImageWithFFMpeg_async(imageFile, '.png').catch(
-				reason => {
-					this.apis.reportLog(`failed to compress using ffmpeg because:`, false, false, true);
-					console.log(reason);
-				}
-			));
-			outFilePath = new PathViewRecord(
-				this.getFFMpegOutFilePath_ObsidianView(imageFile, '.png'), 
-				this.apis
-			);
-			if (await this.apis.exist_async(outFilePath.path_OSView)) {
-				outFilePaths.push(outFilePath);
-			}
-
-			// ffmpeg jpeg
-			if (!this.settings.pngOnly) {
-				await (this.tryCompressImageWithFFMpeg_async(imageFile, '.jpeg').catch(
-					reason => {
-						this.apis.reportLog(`failed to compress using ffmpeg because:`, false, false, true);
-						console.log(reason);
-					}
-				));
-				outFilePath = new PathViewRecord(
-					this.getFFMpegOutFilePath_ObsidianView(imageFile, '.jpeg'), 
-					this.apis
-				);
-				if (await this.apis.exist_async(outFilePath.path_OSView)) {
-					outFilePaths.push(outFilePath);
-				}
-			}
-
-			// pngquant compress-origin-png dithering
-			var isPngquantOriginTrueAvailable = false;
-			await (this.tryCompressImageWithPNGQuant_async(imageFile, true).catch(
-				reason => {
-					this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
-					console.log(reason);
-				}
-			));
-			outFilePath = new PathViewRecord(
-				this.getPNGQuantOutFilePath_ObsidianView(imageFile, true), 
-				this.apis
-			);
-			if (await this.apis.exist_async(outFilePath.path_OSView)) {
-				isPngquantOriginTrueAvailable = true;
-				outFilePaths.push(outFilePath);
-			}
-
-			// pngquant compress-origin-png no-dithering
-			var isPngquantOriginFalseAvailable = false;
-			await (this.tryCompressImageWithPNGQuant_async(imageFile, false).catch(
-				reason => {
-					this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
-					console.log(reason);
-				}
-			));
-			outFilePath = new PathViewRecord(
-				this.getPNGQuantOutFilePath_ObsidianView(imageFile, false), 
-				this.apis
-			);
-			if (await this.apis.exist_async(outFilePath.path_OSView)) {
-				isPngquantOriginFalseAvailable = true;
-				outFilePaths.push(outFilePath);
-			}
-
-			if (!isPngquantOriginTrueAvailable && !isPngquantOriginFalseAvailable && isCanvasPngAvailable && canvasPngOutFilePath) {
-				var canvasPngOut: TFile = (await this.apis.obsidianAPIs.waitUntilTFilesReady_async(
-					[canvasPngOutFilePath.path_ObsidianView], 
-					3000
-				))[0]
-
-				// pngquant compress-canvas-png dithering
-				await (this.tryCompressImageWithPNGQuant_async(canvasPngOut, true).catch(
-					reason => {
-						this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
-						console.log(reason);
-					}
-				));
-				outFilePath = new PathViewRecord(
-					this.getPNGQuantOutFilePath_ObsidianView(canvasPngOut, true), 
-					this.apis
-				);
-				if (await this.apis.exist_async(outFilePath.path_OSView)) {
-					outFilePaths.push(outFilePath);
-				}
-
-				// pngquant compress-canvas-png no-dithering
-				await (this.tryCompressImageWithPNGQuant_async(canvasPngOut, false).catch(
-					reason => {
-						this.apis.reportLog(`failed to compress using pngquant because:`, false, false, true);
-						console.log(reason);
-					}
-				));
-				outFilePath = new PathViewRecord(
-					this.getPNGQuantOutFilePath_ObsidianView(canvasPngOut, false), 
-					this.apis
-				);
-				if (await this.apis.exist_async(outFilePath.path_OSView)) {
-					outFilePaths.push(outFilePath);
-				}
-			}
-
-			var bestOutFilePath = await this.selectBestImage_async(outFilePaths);
-
-			await this.logFiles_compressionLog_async(imageFile, outFilePaths, bestOutFilePath);
-
-			var isReplaced = await this.replaceInputFile_ifOutFileIsBetter_async(imageFile, bestOutFilePath.path_OSView);
-			await this.cleanOutFiles_async(outFilePaths);
-
-			// rename related
-			if (tryRename) {
-				var newSuffixName: string = '';
-				if (isReplaced) {
-					var bestOutFileSuffixName = this.apis.getSuffixName_OSView(bestOutFilePath.path_OSView);
-					newSuffixName = bestOutFileSuffixName;
-				} else {
-					newSuffixName = this.apis.obsidianAPIs.getFileSuffixName_ObsidianView(imageFile);
-				}
-				// try to rename
-				// detached, no await
-				// this.retryable_renameImage_aysnc(imageFile, newSuffixName).catch(e => {
-				// 	this.apis.reportLog(e.toString(), false, true, true);
-				// });
-				try {
-					await this.retryable_renameImage_aysnc(imageFile, newSuffixName);
-					this.apis.reportLog(
-						`success to rename`, 
-						false, true, false
-					);
-				} catch(e) {
-					this.apis.reportLog(e.toString(), false, true, true);
-				}
-			}
-		} catch(error) {
-			await this.cleanOutFiles_async(outFilePaths);
-			this.apis.reportLog('Compression Interrupted', false, true, true);
-			console.log(error);
+			if (this.oneCommandOneTime.alreadyHasOneRunningTask()) return;
+			this.oneCommandOneTime.knowATaskIsRunning();
+		} catch (error) {
+			return;
+		}
+		try {
+			const r = await this.pluginAPIs.compressAPIs.compressorRenamer.tryCompressImageThenRename_AloneExecute_async(imageFile, true);
+			if (r instanceof Error) { throw r; }
+		} catch (e) {
+			console.log(`can NOT compress "${imageFile.name}" at "${imageFile.path}" because:`);
+			console.log(e);
 		} finally {
-			if (this.oneCompressionTaskOneTime.alreadyHasOneRunningTask())
-				this.oneCompressionTaskOneTime.knowThatTaskEnd();
-			if (isMainTask)
-				if (this.oneMainTaskOneTime.alreadyHasOneRunningTask())
-					this.oneMainTaskOneTime.knowThatTaskEnd();
+			this.oneCommandOneTime.knowThatTaskEnd();
 		}
 	}
 
 	// masterFile is the file who own and could link to the image
 	// if NOT renamed throw error
 	// do NOT start to rename immediately, before start, it wait for a interval
-	async retryable_renameImage_aysnc(
-				imageFile: TFile, 
-				suffixName: string, 
-				masterFile: TFile | null = null, 
-				retry_interval_ms: number = 300, 
+	async retryable_renameImage_async(
+				imageFile: TFile,
+				suffixName: string,
+				masterFile: TFile | null = null,
+				retry_interval_ms: number = 300,
 				maxRetryTimes: number = 10){
 		if (this.isImageReadonly(imageFile)) return;
-		
+
 		var life = maxRetryTimes;
 		var lastError;
 		while (true) {
 			if (life <= 0) {
-				this.apis.reportLog(`failed to rename because: reach retry limit, \nlastError is: \n${lastError}`, 
+				this.sharedAPIs.reportLog(`failed to rename because: reach retry limit, \nlastError is: \n${lastError}`,
 					true, false, false);
 				throw new Error('report error');
 			}
 			life--;
 			// wait a time
-			await this.apis.successAfterMs_async(retry_interval_ms);
+			await this.sharedAPIs.successAfterMs_async(retry_interval_ms);
 			// retry once
 			try {
 				await this.renameImage_async(imageFile, suffixName, masterFile);
@@ -845,7 +623,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 
 		if (suffixName.length != 0 && !suffixName.startsWith('.')) suffixName = '.' + suffixName;
 
-		var apis = this.apis;
+		var apis = this.sharedAPIs;
 		var opis = apis.obsidianAPIs;
 
 		if (!masterFile) {
@@ -878,247 +656,37 @@ export default class KORCImageUtilPlugin extends Plugin {
 				if (currentFileIsMasterFile) masterFile = editingFile;
 
 				if (!masterFile) {
-					apis.reportLog("failed to rename image because: \ncan NOT determine the image name because: \ndo NOT know the file, who own the image", 
+					apis.reportLog("failed to rename image because: \ncan NOT determine the image name because: \ndo NOT know the file, who own the image",
 						true, false, false);
 					throw new Error('report error');
 				}
 			}
 		}
 
-		var dirPath = opis.getFileDirectory_ObsidianView(imageFile);
+		var dirPath = opis.getFileParentDirectory_ObsidianView(imageFile);
 
 		var date = new Date();
-		var newName = 
-			opis.getFilePrefixName_ObsidianView(masterFile) + 
-			' - ' + 
-			`${date.getFullYear()}-${date.getMonth()+1}-${date.getDate()}T${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}-${date.getMilliseconds()}` + 
+		var newName =
+			opis.getFilePrefixName_ObsidianView(masterFile) +
+			' - ' +
+			`${date.getFullYear()}-${date.getMonth()+1}-${date.getDate()}T${date.getHours()}-${date.getMinutes()}-${date.getSeconds()}-${date.getMilliseconds()}` +
 			suffixName;
-		
-		var newPath = 
+
+		var newPath =
 			opis.concatDirectoryPathAndItemName_ObsidianView(
 				dirPath, newName
 			);
-		
-		// since in previous codes, know that the master file's link cache contain the link to image, 
+
+		// since in previous codes, know that the master file's link cache contain the link to image,
 		//   so rename can auto-update the link to image in master file
 		await opis.move_fileOrDirectory_async(imageFile, newPath);
-	}
-
-	// https://pngquant.org/
-	// https://manpages.debian.org/testing/pngquant/pngquant.1.en.html
-	// dithering: use more color in pattle, so that have a smoother nicer gradient-color
-	async tryCompressImageWithPNGQuant_async(file: TFile, enableDithering: boolean = true): Promise<void> {
-		var apis = this.apis;
-
-		var outFilePath_ObsidianView = this.getPNGQuantOutFilePath_ObsidianView(file, enableDithering);
-		await apis.obsidianAPIs.deleteFileIfExist_async(outFilePath_ObsidianView);
-		var inFilePath_OSView = apis.obsidianAPIs.getFilePath_OSView(file);
-		var outFilePath_OSView = apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
-
-		await this.tryExecPNGQuant_async(inFilePath_OSView, outFilePath_OSView, enableDithering);
-	}
-
-	getPNGQuantOutFilePath_ObsidianView(inFile: TFile, enableDithering: boolean): string {
-		var apis = this.apis;
-
-		var pngQuantNamePart = '-pngquant';
-		var ditheringInfoNamePart = enableDithering ? '-dithering' : '-nodithering';
-		var outFileExtention = '.png';
-		var outFilePath_ObsidianView = 
-			apis.obsidianAPIs.concatDirectoryPathAndItemName_ObsidianView(
-				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
-				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + pngQuantNamePart + ditheringInfoNamePart + outFileExtention
-			);
-		return outFilePath_ObsidianView;
-	}
-
-	getPNGQuantOutFilePath_OSView(outFilePath_ObsidianView: string): string {
-		return this.apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
-	}
-
-	private tryExecPNGQuant_async(inFilePath_OSView: string, outFilePath_OSView: string, enableDithering: boolean): Promise<void> {
-		return new Promise<void>(
-			(resolve, reject) => {
-				try{
-					var apis = this.apis;
-		
-					var pngquant = '"' + apis.concatPath_OSView([
-						apis.obsidianAPIs.getVaultPath_OSView(), 
-						'04_Executable', 
-						'pngquant.exe'
-					]) + '"';
-
-					var command = `${pngquant} --skip-if-larger ${enableDithering ? '' : '--ordered'} --speed=1 --quality=45-85 "--output=${outFilePath_OSView}" "${inFilePath_OSView}"`;
-					exec(command, (error: ExecException, stdout: string, stderr: string) => {
-						try {
-							if (error) {
-								apis.reportLog('pngquant error', false, false, true);
-								reject(error);
-								return;
-							}
-			
-							access(outFilePath_OSView, (err) => {
-								try {
-									if (err) {
-										apis.reportLog('expect pngquant output a file, but NOT', false, false, true);
-										reject(err);
-										return;
-									}
-				
-									resolve();
-								} catch(error) {
-									reject(error);
-								}
-							});
-						} catch(error) {
-							reject(error);
-						}
-					});
-				} catch (error) {
-					reject(error);
-				}
-			}
-		);
-	}
-
-	async tryCompressImageWithFFMpeg_async(file: TFile, format: '.png' | '.jpeg'): Promise<void> {
-		var apis = this.apis;
-
-		var outFilePath_ObsidianView = this.getFFMpegOutFilePath_ObsidianView(file, format);
-		await apis.obsidianAPIs.deleteFileIfExist_async(outFilePath_ObsidianView);
-		var inFilePath_OSView = apis.obsidianAPIs.getFilePath_OSView(file);
-		var outFilePath_OSView = apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
-
-		await this.tryExecFFMpeg_async(inFilePath_OSView, outFilePath_OSView);
-		// await this.spawnFFMpeg(inFilePath, outFilePath);
-	}
-
-	getFFMpegOutFilePath_ObsidianView(inFile: TFile, format: '.png' | '.jpeg'): string {
-		var apis = this.apis;
-
-		var ffmpegNamePart = '-ffmpeg';
-		var outFileExtention = format;
-		var outFilePath_ObsidianView = 
-			apis.obsidianAPIs.concatDirectoryPathAndItemName_ObsidianView(
-				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
-				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + ffmpegNamePart + outFileExtention
-			);
-		return outFilePath_ObsidianView;
-	}
-
-	getFFMpegOutFilePath_OSView(outFilePath_ObsidianView: string): string {
-		return this.apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
-	}
-
-	private tryExecFFMpeg_async(inFilePath_OSView: string, outFilePath_OSView: string): Promise<void> {
-		return new Promise<void>(
-			(resolve, reject) => {
-				try {
-					var apis = this.apis;
-
-					var ffmpeg = '"' + apis.concatPath_OSView([
-						apis.obsidianAPIs.getVaultPath_OSView(), 
-						'04_Executable', 
-						'ffmpeg.exe'
-					]) + '"';
-
-					var command = `${ffmpeg} -nostdin -i "${inFilePath_OSView}" -compression_level 100 -qscale:v 4 "${outFilePath_OSView}"`;
-					exec(command, (error: ExecException, stdout: string, stderr: string) => {
-						try {
-							if (error) {
-								console.log(error);
-								apis.reportLog('ffmpeg error', true, false, true);
-								throw new Error('report error');
-							}
-
-							access(outFilePath_OSView, (err) => {
-								try {
-									if (err) {
-										console.log(err);
-										apis.reportLog('expect ffmpeg output a file, but NOT', true, false, true);
-										throw new Error('report error');
-									}
-
-									resolve();
-								} catch(err) {
-									reject(err);
-								}
-							});
-						} catch(err) {
-							reject(err);
-						}
-					});
-				} catch(err) {
-					reject(err);
-				}
-			}
-		);
-	}
-
-	private spawnFFMpeg_async(inFilePath_OSView: string, outFilePath_OSView: string): Promise<void> {
-		return new Promise<void>(
-			(resolve, reject) => {
-				try {
-					var apis = this.apis;
-
-					var executable = 'ffmpeg';
-					var args = [
-						'-nostdin', 
-						'-i', inFilePath_OSView, 
-						'-compression_level', '100', 
-						'-qscale:v', '4', 
-						outFilePath_OSView
-					];
-					var process = spawn(executable, args);
-					process.on('close', (code: number | null) => {
-						try {
-							if (code && code >= 1) {
-								apis.reportLog('ffmpeg return code >= 1', true, false, true);
-								throw new Error('report error');
-							}
-
-							access(outFilePath_OSView, (err) => {
-								try {
-									if (err) {
-										console.log(err);
-										apis.reportLog('expect ffmpeg output a file, but NOT', true, false, true);
-										throw new Error('report error');
-									}
-
-									resolve();
-								} catch(err) {
-									reject(err);
-								}
-							});
-						} catch(err) {
-							reject(err);
-						}
-					});
-				} catch(err) {
-					reject(err);
-				}
-			}
-		);
-	}
-
-	// quality [between 0 and 1 - MDN web docs](https://developer.mozilla.org/en-US/docs/Web/API/HTMLCanvasElement/toBlob)
-	async tryCompressImageWithCanvas_async(file: TFile, suffixName: '.jpeg' | '.png', quality: number = 0.8): Promise<void> {
-		var apis = this.apis;
-
-		var bytes = await apis.obsidianAPIs.readFileBinary_async(file);
-		var bytesArr = [bytes];
-		var blob = new Blob(bytesArr, {
-			"type": "image"
-		});
-		
-		await this.runCanvas_async(file, suffixName, quality, blob);
 	}
 
 	runCanvas_async(file: TFile, suffixName: '.jpeg' | '.png', quality: number, blob: Blob): Promise<void> {
 		return new Promise<void>(
 			(resolve, reject) => {
 				try {
-					var apis = this.apis;
+					var apis = this.sharedAPIs;
 					var plugin = this;
 
 					var reader = new FileReader();
@@ -1132,7 +700,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 							// contains base64 data that represent a image
 							var dataURL: string = maybeDataURL;
 							// console.log(dataURL.toString());
-				
+
 							// [new Image() is equivalent to calling document.createElement('img'). - MDN web docs](https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement)
 							// [which is not attached to any DOM tree. - MDN web docs](https://developer.mozilla.org/en-US/docs/Web/API/HTMLImageElement)
 							var image = new Image();
@@ -1144,19 +712,19 @@ export default class KORCImageUtilPlugin extends Plugin {
 										apis.reportLog('canvas can NOT get canvas context', true, false, true);
 										throw new Error('report error');
 									}
-					
+
 									var imageWidth = image.width;
 									var imageHeight = image.height;
-					
+
 									canvas.width = imageWidth;
 									canvas.height = imageHeight;
 									// canvas2D.fillStyle = '#fff';
 									// canvas2D.fillRect(0, 0, imageWidth, imageHeight);
 									canvas2D.drawImage(
-										image, 
-										0, 0, imageWidth, imageHeight, 
+										image,
+										0, 0, imageWidth, imageHeight,
 										0, 0, imageWidth, imageHeight);
-									
+
 									var mimeType = '';
 									if (suffixName == '.jpeg') {
 										mimeType = 'image/jpeg';
@@ -1180,12 +748,12 @@ export default class KORCImageUtilPlugin extends Plugin {
 														(outFile: TFile) => {
 															apis.obsidianAPIs.writeFileBinary_async(outFile, bytes).then(
 																() => {
-																	var outFile = apis.obsidianAPIs.tryGetFile(outFilePath_ObsidianView);
+																	var outFile = apis.obsidianAPIs.tryGetFile_ObsidianView(outFilePath_ObsidianView);
 																	if (!outFile) {
 																		apis.reportLog('expect canvas output a file, but NOT', true, false, true);
 																		throw new Error('report error');
 																	}
-						
+
 																	resolve();
 																}
 															).catch(
@@ -1231,125 +799,54 @@ export default class KORCImageUtilPlugin extends Plugin {
 	}
 
 	getCanvasOutFilePath_ObsidianView(inFile: TFile, suffixName: '.jpeg' | '.png'): string {
-		var apis = this.apis;
+		var apis = this.sharedAPIs;
 
 		var canvasNamePart = '-canvas';
 		var outFileExtention = suffixName;
-		var outFilePath_ObsidianView = 
+		var outFilePath_ObsidianView =
 			apis.obsidianAPIs.concatDirectoryPathAndItemName_ObsidianView(
-				apis.obsidianAPIs.getFileDirectory_ObsidianView(inFile), 
+				apis.obsidianAPIs.getFileParentDirectory_ObsidianView(inFile),
 				apis.obsidianAPIs.getFilePrefixName_ObsidianView(inFile) + canvasNamePart + outFileExtention);
 		return outFilePath_ObsidianView;
 	}
 
 	getCanvasOutFilePath_OSView(outFilePath_ObsidianView: string): string {
-		return this.apis.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
-	}
-
-	async selectBestImage_async(candidateImagePaths: PathViewRecord[], strategy: 'min size' = 'min size'): Promise<PathViewRecord> {
-		if (strategy == 'min size') {
-			return await this.selectBestImage_selectMinSize_async(candidateImagePaths);
-		}
-
-		this.apis.reportLog(`when select best image, there is no such strategy: ${strategy}`, true, false, true);
-		throw new Error('report error');
-	}
-
-	private async selectBestImage_selectMinSize_async(candidateImagePaths: PathViewRecord[]): Promise<PathViewRecord> {
-		var apis = this.apis;
-
-		if (candidateImagePaths.length == 0) {
-			apis.reportLog('there is no candidate image', true, false, true);
-			throw new Error('report error');
-		}
-
-		var paths = candidateImagePaths;  // alias
-		var minSize_index = 0;  // when finding it's current found min, after finding it's min of all
-		var minSize = await apis.getSize_async(paths[minSize_index].path_OSView);
-		for(var i=1; i<candidateImagePaths.length; i++) {
-			var currentSize = await apis.getSize_async(paths[i].path_OSView);
-			if (currentSize < minSize) {
-				minSize_index = i;
-				minSize = currentSize;
-			}
-		}
-		return paths[minSize_index];
-	}
-
-	async logFiles_compressionLog_async(inFile: TFile, outFilePaths: PathViewRecord[], bestOutFilePath: PathViewRecord) {
-		var apis = this.apis;
-
-		console.log('in file:');
-		console.log(inFile);
-		console.log('out file paths:');
-		console.log(outFilePaths);
-		console.log('best out file path:');
-		console.log(bestOutFilePath);
-
-		apis.reportLog(
-			`in file:\n` + 
-			`- name: ${apis.obsidianAPIs.getFileName_ObsidianView(inFile)}\n` + 
-			`- size: ${apis.obsidianAPIs.getFileSize(inFile)}\n` + 
-			`out files:\n` + 
-			`- count: ${outFilePaths.length}\n` + 
-			`best out file:\n` + 
-			`- name: ${apis.getName_OSView(bestOutFilePath.path_OSView)}\n` + 
-			`- size: ${this.fileSizeToReadableFileSize(await apis.getSize_async(bestOutFilePath.path_OSView))}\n`, 
-			false, true, true
-		);
-	}
-
-	// return is replaced
-	async replaceInputFile_ifOutFileIsBetter_async(inFile: TFile, outFilePath_OSView: string): Promise<boolean> {
-		var apis = this.apis;
-
-		var inSize = apis.obsidianAPIs.getFileSize(inFile);
-		var outSize = await apis.getSize_async(outFilePath_OSView);
-		if (outSize < inSize) {
-			var outBytes = await apis.readBytes_async(outFilePath_OSView);
-			await apis.obsidianAPIs.writeFileBinary_async(inFile, outBytes);
-			return true;
-		}
-		return false;
-	}
-
-	async cleanOutFiles_async(outFilePaths: PathViewRecord[]) {
-		var outFilePaths_ObsidianView: string[] = outFilePaths.map(
-			path => path.path_ObsidianView
-		)
-		var files = await this.apis.obsidianAPIs.waitUntilTFilesReady_async(
-			outFilePaths_ObsidianView, 
-			3000, 
-			300
-		);
-		await this.apis.obsidianAPIs.tryDeleteFiles_async(files);
+		return this.sharedAPIs.obsidianAPIs.getPath_OSView(outFilePath_ObsidianView);
 	}
 
 	async command_moveImagesPocket_async() {
-		// idle
-		await this.idle_async();
+		try {
+			if (this.oneCommandOneTime.alreadyHasOneRunningTask()) return;
+			this.oneCommandOneTime.knowATaskIsRunning();
+		} catch (error) {
+			return;
+		}
+		try {
+			// idle
+			await this.idle_async();
 
-		// move
-		this.apis.reportLog(`move start`, false, false, true, false);
-		var countMoved = await this.moveImagesIntoPocket_async();
-		this.apis.reportLog(`move finished, ${countMoved} images is moved`, false, true, true, false);
+			// move
+			this.sharedAPIs.reportLog(`move start`, false, false, true, false);
+			const countMoved = await this.moveImagesIntoPocket_async();
+			this.sharedAPIs.reportLog(`move finished, ${countMoved} images is moved`, false, true, true, false);
+		} catch (error) {
+			// ...
+		} finally {
+			this.oneCommandOneTime.knowThatTaskEnd();
+		}
 	}
 
 	async moveImagesIntoPocket_async(): Promise<number> {
-		var apis = this.apis;
+		if (!this.pluginAPIs.validOwnerPocket()) {
+			this.sharedAPIs.reportLog('abort. invalid image-directory-name', true, true, true, false);
+			return 0;
+		}
+
+		var apis = this.sharedAPIs;
 		var opis = apis.obsidianAPIs;
 
-		if (this.settings.imageFolderName == '') {
-			apis.reportLog('abort. please set image-folder-name in the setting-tab', true, true, true, false);
-			return 0;
-		}
-		if (!this.isValidImageFolderNameSetting(this.settings.imageFolderName)) {
-			apis.reportLog('abort. invalid image-folder-name', true, true, true, false);
-			return 0;
-		}
-
 		// get images
-		var images: TFile[] = await this.apis.obsidianAPIs.getAllImageFiles();
+		var images: TFile[] = await this.sharedAPIs.obsidianAPIs.getAllImageFiles();
 		if (images.length == 0) {
 			return 0;
 		}
@@ -1367,25 +864,16 @@ export default class KORCImageUtilPlugin extends Plugin {
 			var ownerCount = owners.length;
 
 			if (ownerCount == 1) {
-				var imageFile = opis.getFile(imagePath);
+				var imageFile = opis.getFile_ObsidianView(imagePath);
 				var owner = owners[0];
-				if (this.isImageGetLostFromOwner(imageFile, owner)) {
+				const t = this.pluginAPIs.tryGetOwnerPocketPath_OSView(owner);
+				if (typeof t != "string") return countMoved;
+				const ownerPocketPath = t;
+				if (this.isImageGetLostFromOwnerPocket(imageFile, owner)) {
 					// ill
-					var imageName = opis.getFileName_ObsidianView(imageFile);
-					var imagePath = opis.getFilePath_ObsidianView(imageFile);
-					var ownerParentPath = '';
-					var ownerParent = owner.parent;
-					if (ownerParent) {
-						ownerParentPath = ownerParent.path;
-					}
-					var ownerPocketPath = opis.concatDirectoryPathAndItemName_ObsidianView(
-						ownerParentPath, 
-						this.settings.imageFolderName
-					);
-					var correctImagePath = opis.concatDirectoryPathAndItemName_ObsidianView(
-						ownerPocketPath, 
-						imageName
-					);
+					var imageName = opis.getFileName_OSView(imageFile);
+					imagePath = opis.getFilePath_ObsidianView(imageFile);
+					var correctImagePath = this.pluginAPIs.getCorrectImageFullPath3(imageName, ownerPocketPath);
 					apis.reportLog(`moving "${imageName}" \n to "${correctImagePath}" \n from "${imagePath}"`, false, false, true, false);
 					await opis.createDirectoryIfNOTExist_async(ownerPocketPath);
 					await opis.move_fileOrDirectory_async(imageFile, correctImagePath);
@@ -1407,31 +895,6 @@ export default class KORCImageUtilPlugin extends Plugin {
 	}
 
 	isImageReadonly(image: TFile) {
-		var filename = this.apis.obsidianAPIs.getFileName_ObsidianView(image).toLowerCase();
-		var readonlyMark = this.settings.readonlyMark.toLowerCase();
-		return filename.contains(readonlyMark);
-	}
-
-	fileSizeToReadableFileSize(size: number): string {
-		var result: string = '';
-		var sizeStr = size.toString();
-
-		var partStart = sizeStr.length - 3;
-		var partEnd = sizeStr.length;  // exclusive
-		while(true) {
-			if (partStart <= 0) {
-				var part = sizeStr.substring(0, partEnd);
-				result = part + result;
-				break;
-			}
-
-			var part = sizeStr.substring(partStart, partEnd);
-			result = ', ' + part + result;
-			
-			partStart -= 3;
-			partEnd -= 3;
-		}
-
-		return result;
+		return this.pluginAPIs.settingsAPIs.isReadonly(this.sharedAPIs.obsidianAPIs.getFilePath_OSView(image));
 	}
 }

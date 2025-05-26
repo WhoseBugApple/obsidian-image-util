@@ -2,8 +2,8 @@ import { SharedAPIs } from './SharedAPIs';
 import { App, CachedMetadata, Editor, EmbedCache, FileManager, FileSystemAdapter, LinkCache, MarkdownView, MetadataCache, TAbstractFile, TFile, TFolder, Vault, Workspace, WorkspaceLeaf, normalizePath } from 'obsidian';
 
 export class ObsidianAPIs {
-	private app: App;
-	private sharedAPIs: SharedAPIs;
+	private readonly app: App;
+	private readonly sharedAPIs: SharedAPIs;
 
 	constructor(app: App, sharedAPIs: SharedAPIs) {
 		this.app = app;
@@ -77,7 +77,7 @@ export class ObsidianAPIs {
 	}
 
 	async deleteFileIfExist_async(path: string) {
-		var file = this.tryGetFile(path);
+		var file = this.tryGetFile_ObsidianView(path);
 		if (!file) return;
 		await this.getVault().delete(file);
 	}
@@ -112,7 +112,7 @@ export class ObsidianAPIs {
 	}
 
 	async createFile_async(path: string, content: string): Promise<TFile> {
-		var file = this.tryGetFile(path);
+		var file = this.tryGetFile_ObsidianView(path);
 		if (file) {
 			this.sharedAPIs.reportLog('want to create a file, but it already exist', true, false, true);
 			throw new Error('report error');
@@ -121,7 +121,7 @@ export class ObsidianAPIs {
 	}
 
 	async createFileIfNOTExist_async(path: string, content: string): Promise<TFile> {
-		var file = this.tryGetFile(path);
+		var file = this.tryGetFile_ObsidianView(path);
 		if (file) return file;
 		return await this.getVault().create(path, content);
 	}
@@ -229,9 +229,9 @@ export class ObsidianAPIs {
 	}
 
 	// don't forget suffix .md
-	tryGetFile(path: string): TFile | null {
+	tryGetFile_ObsidianView(pathObs: string): TFile | null {
 		var file: TFile | null = null;
-		var fileOrFolder = this.getVault().getAbstractFileByPath(path);
+		var fileOrFolder = this.getVault().getAbstractFileByPath(pathObs);
 		if (!fileOrFolder) return null;
 		if (fileOrFolder instanceof TFile) {
 			file = fileOrFolder;
@@ -239,8 +239,8 @@ export class ObsidianAPIs {
 		return file;
 	}
 
-	getFile(path: string): TFile {
-		var fileOrNull: TFile | null = this.tryGetFile(path);
+	getFile_ObsidianView(pathObs: string): TFile {
+		var fileOrNull: TFile | null = this.tryGetFile_ObsidianView(pathObs);
 		if (!fileOrNull) {
 			this.sharedAPIs.reportLog('can NOT find file', true, false, true);
 			throw new Error('report error');
@@ -249,11 +249,11 @@ export class ObsidianAPIs {
 		return file;
 	}
 
-	tryGetFiles(paths_ObsidianView: string[]): TFile[] | null {
+	tryGetFiles_ObsidianView(paths_ObsidianView: string[]): TFile[] | null {
 		var result: TFile[] = [];
 		for(var i=0; i<paths_ObsidianView.length; i++) {
 			var path = paths_ObsidianView[i];
-			var maybeFile = this.tryGetFile(path);
+			var maybeFile = this.tryGetFile_ObsidianView(path);
 			if (!maybeFile)
 				return null;
 			result.push(maybeFile);
@@ -406,12 +406,12 @@ export class ObsidianAPIs {
 	}
 
 	concatDirectoryPathAndItemName_ObsidianView(dirPath: string, fileOrDirName: string): string {
-		var concated: string = '';
+		let concated: string = '';
 		// get path separator & normalize path
-		var sep = this.getPathSeparator_ObsidianView();
-		var dirPathAsPrefix = this.normalizePath_ObsidianView(dirPath);
+		const sep = this.getPathSeparator_ObsidianView();
+		let dirPathAsPrefix = this.normalizePath_ObsidianView(dirPath);
 		// is root dir?
-		var rootDir = false;
+		let rootDir = false;
 		if (dirPathAsPrefix == '' || dirPathAsPrefix == sep) {
 			rootDir = true;
 		}
@@ -433,19 +433,34 @@ export class ObsidianAPIs {
 		return file.path;
 	}
 
-	getFileFolder_ObsidianView(file: TFile): string {
-		return this.getFileDirectory_ObsidianView(file);
+	getPathByDirectoryAndName_ObsidianView(dirObs: string, name: string): string {
+		return this.concatDirectoryPathAndItemName_ObsidianView(dirObs, name);
 	}
 
-	getFileDirectory_ObsidianView(file: TFile): string {
-		var parent = file.parent;
-		var dirPath = parent ? parent.path : '';
+	getNeighborPath_ObsidianView(meFile: TFile, neighborName: string): string {
+		return this.getPathByDirectoryAndName_ObsidianView(
+			this.getFileParentDirectory_ObsidianView(meFile),
+			neighborName
+		);
+	}
+
+	getFileFolder_ObsidianView(file: TFile): string {
+		return this.getFileParentDirectory_ObsidianView(file);
+	}
+
+	getFileParentDirectory_ObsidianView(file: TFile): string {
+		const parent = file.parent;
+		let dirPath = parent ? parent.path : '';
 		dirPath = this.normalizePath_ObsidianView(dirPath);
 		return dirPath;
 	}
 
 	getFileName_ObsidianView(file: TFile): string {
 		return file.name;
+	}
+
+	getFileName_OSView(file: TFile): string {
+		return this.sharedAPIs.getName_OSView(this.getFilePath_OSView(file));
 	}
 
 	getFilePrefixName_ObsidianView(file: TFile): string {
@@ -498,7 +513,7 @@ export class ObsidianAPIs {
 
 	// 1s == 1000ms
 	// m == 10^-3
-	waitUntilTFilesReady_async(paths_ObsidianView: string[], timeOut_ms: number = 3000, recheckInterval_ms: number = timeOut_ms / 10): Promise<TFile[]> {
+	async waitUntilTFilesReady_async(paths_ObsidianView: string[], timeOut_ms: number = 3000, recheckInterval_ms: number = timeOut_ms / 10): Promise<TFile[]> {
 		return new Promise<TFile[]>(
 			(resolve, reject) => {
 				const startDate = new Date();
@@ -525,16 +540,16 @@ export class ObsidianAPIs {
 			// wait interval
 			// loop
 			// check time out
-			var currentDate = new Date();
-			var currentTime = currentDate.getTime();
-			var isTimeOut = currentTime - startTime_ms > timeOut_ms;
+			const currentDate = new Date();
+			const currentTime = currentDate.getTime();
+			const isTimeOut = currentTime - startTime_ms > timeOut_ms;
 			if (isTimeOut) {
 				reject(`when wait TFiles to be ready, \ntime out, wait ${new Date().getTime() - startTime_ms} ms in total`);
 				return;
 			}
 
 			// try
-			var maybeAllTFiles = this.tryGetFiles(paths_ObsidianView);
+			const maybeAllTFiles = this.tryGetFiles_ObsidianView(paths_ObsidianView);
 			if (maybeAllTFiles) {
 				// ok!
 				resolve(maybeAllTFiles);
@@ -567,10 +582,10 @@ export class ObsidianAPIs {
 		}
 	}
 
-	imageExts = ['.jpeg', '.png', '.jpg'];
-	isImage(file: TFile) {
-		var name = this.getFileName_ObsidianView(file);
-		var ext = this.getFileSuffixName_ObsidianView(file);
+	imageExts = ['.avif', '.jpeg', '.jpg', '.png', 'webp'];
+	isImage(file: TFile): boolean {
+		let name = this.getFileName_ObsidianView(file);
+		let ext = this.getFileSuffixName_ObsidianView(file);
 		if (ext.length <= 0 || ext.length >= name.length) {
 			return false;
 		}
@@ -597,5 +612,77 @@ export class ObsidianAPIs {
 				return [];
 			}
 		)
+	}
+
+	normalizeResourceDirectoryPath_OSView(path: string): string {
+		return this.sharedAPIs.normalizePath_OSView(path);
+	}
+
+	validResourceDirectoryName_OSView_TextTable(): string {
+		return '0-9 a-z A-Z " _-"';
+	}
+
+	// empty -> false
+	isValidResourceDirectoryName_OSView(name: string): boolean {
+		if (name.length == 0) return false;
+		// available char
+		// a-z A-Z 0-9 ' ' '-' '_'
+		var code0 = '0'.charCodeAt(0);
+		var code9 = '9'.charCodeAt(0);
+		var codeUA = 'A'.charCodeAt(0);
+		var codeUZ = 'Z'.charCodeAt(0);
+		var codela = 'a'.charCodeAt(0);
+		var codelz = 'z'.charCodeAt(0);
+		var codespace = ' '.charCodeAt(0);
+		var codemidline = '-'.charCodeAt(0);
+		var codelowline = '_'.charCodeAt(0);
+		for (var i = 0; i < name.length; i++) {
+			var ch = name[i];
+			var code = ch.charCodeAt(0);
+			if (!(	(codela <= code && code <= codelz) ||
+				(codeUA <= code && code <= codeUZ) ||
+				(code0 <= code && code <= code9) ||
+				code == codespace ||
+				code == codemidline ||
+				code == codelowline			)		) {
+				return false;
+			}
+		}
+		return true;
+	}
+
+	validResourceDirectoryPath_OSView_TextTable(): string {
+		return '0-9 a-z A-Z " _-" \\';
+	}
+
+	// empty -> false
+	isValidResourceDirectoryPath_OSView(path: string): boolean {
+		if (path.length == 0) return false;
+		// available char
+		// a-z A-Z 0-9 ' ' '-' '_' '\'
+		var code0 = '0'.charCodeAt(0);
+		var code9 = '9'.charCodeAt(0);
+		var codeUA = 'A'.charCodeAt(0);
+		var codeUZ = 'Z'.charCodeAt(0);
+		var codela = 'a'.charCodeAt(0);
+		var codelz = 'z'.charCodeAt(0);
+		var codespace = ' '.charCodeAt(0);
+		var codemidline = '-'.charCodeAt(0);
+		var codelowline = '_'.charCodeAt(0);
+		var coderightslash = '\\'.charCodeAt(0);
+		for (var i = 0; i < path.length; i++) {
+			var ch = path[i];
+			var code = ch.charCodeAt(0);
+			if (!(	(codela <= code && code <= codelz) ||
+				(codeUA <= code && code <= codeUZ) ||
+				(code0 <= code && code <= code9) ||
+				code == codespace ||
+				code == codemidline ||
+				code == codelowline ||
+				code == coderightslash       )		) {
+				return false;
+			}
+		}
+		return true;
 	}
 }
