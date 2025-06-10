@@ -111,4 +111,16 @@ export class PluginAPIs {
 			resolve(exist);
 		});
 	}
+
+	getJSScriptFullPath_OSView(name: string): string {
+		name = name.trim();
+		if (!name.endsWith('.js')) name += '.js';
+		const t = this.tryGetExecutableDirectoryFullPath_OSView();
+		if (typeof t != "string") {
+			if (t instanceof Error) throw t;
+			else throw new Error('failed to get executable directory path');
+		}
+		const exeDirPathOS = t;
+		return this.sharedAPIs.concatPath_OSView([exeDirPathOS, name]);
+	}
 }
