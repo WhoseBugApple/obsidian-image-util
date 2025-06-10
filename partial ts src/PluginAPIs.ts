@@ -112,7 +112,7 @@ export class PluginAPIs {
 		});
 	}
 
-	getJSScriptFullPath_OSView(name: string): string {
+	public getJSScriptFullPath_OSView(name: string): string {
 		name = name.trim();
 		if (!name.endsWith('.js')) name += '.js';
 		const t = this.tryGetExecutableDirectoryFullPath_OSView();
