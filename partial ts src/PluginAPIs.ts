@@ -48,8 +48,27 @@ export class PluginAPIs {
 		}
 	}
 
+	tryGetImageDirectoryFullPath_ObsidianView(owner: TFile): string | null | Error {
+		try {
+			const ownerParentPath = this.sharedAPIs.obsidianAPIs.getFileParentDirectory_ObsidianView(owner);
+			const t = this.settingsAPIs.tryGetValidImageDirectoryName_OSView();
+			if (typeof t != "string") return t;
+			const imageDirName: string = t;
+			return this.sharedAPIs.obsidianAPIs.concatDirectoryPathAndItemName_ObsidianView(
+				ownerParentPath,
+				imageDirName
+			);
+		} catch (e) {
+			return e;
+		}
+	}
+
 	tryGetOwnerPocketPath_OSView(owner: TFile): string | null | Error {
 		return this.tryGetImageDirectoryFullPath_OSView(owner);
+	}
+
+	tryGetOwnerPocketPath_ObsidianView(owner: TFile): string | null | Error {
+		return this.tryGetImageDirectoryFullPath_ObsidianView(owner);
 	}
 
 	tryGetCorrectImageFullPath(image: TFile, owner: TFile): string | null | Error {

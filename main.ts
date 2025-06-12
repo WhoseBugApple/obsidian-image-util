@@ -866,7 +866,7 @@ export default class KORCImageUtilPlugin extends Plugin {
 			if (ownerCount == 1) {
 				var imageFile = opis.getFile_ObsidianView(imagePath);
 				var owner = owners[0];
-				const t = this.pluginAPIs.tryGetOwnerPocketPath_OSView(owner);
+				const t = this.pluginAPIs.tryGetOwnerPocketPath_ObsidianView(owner);
 				if (typeof t != "string") return countMoved;
 				const ownerPocketPath = t;
 				if (this.isImageGetLostFromOwnerPocket(imageFile, owner)) {
